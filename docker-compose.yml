@@ -1,0 +1,66 @@
+# 本地基础设施，不包含 Java/React 应用进程；应用可由 IDEA 启动和调试。
+services:
+  postgres:
+    # pgvector 镜像同时承载关系事务、Agent checkpoint 和向量知识库。
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: buyforu
+      POSTGRES_USER: buyforu
+      POSTGRES_PASSWORD: buyforu
+    ports:
+      - "5432:5432"
+    volumes:
+      - buyforu-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buyforu"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  keycloak:
+    # 本地 OIDC 身份服务，首次启动导入 infra/keycloak 下的 realm 配置。
+    image: quay.io/keycloak/keycloak:26.3
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:?set KEYCLOAK_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./infra/keycloak/buyforu-realm.json:/opt/keycloak/data/import/buyforu-realm.json:ro
+      - buyforu-keycloak:/opt/keycloak/data
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /realms/buyforu HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    # 只提供 Embedding，不作为 DeepSeek 规划失败时的降级 Chat 模型。
+    image: ollama/ollama:0.11.10
+    ports:
+      - "11434:11434"
+    volumes:
+      - buyforu-ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama-init:
+    # 等待 Ollama 健康后一次性拉取固定 Embedding 模型。
+    image: ollama/ollama:0.11.10
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: pull ${OLLAMA_EMBEDDING_MODEL:-embeddinggemma}
+    restart: "no"
+
+volumes:
+  # 命名卷让容器重建后仍保留数据库、用户和模型数据。
+  buyforu-postgres:
+  buyforu-keycloak:
+  buyforu-ollama:

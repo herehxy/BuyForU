@@ -1,0 +1,207 @@
+import { FormEvent, useEffect, useState } from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { cancelRun, clarify, decide, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import type { DeliveryAddress } from './api'
+import type { AgentRun } from './types'
+import type { User } from 'oidc-client-ts'
+import { authConfigurationError, userManager } from './auth'
+
+let callbackInFlight: Promise<User> | undefined
+
+// React StrictMode 在开发环境会重复执行 effect；共享 Promise 防止 OIDC callback 被消费两次。
+function completeSignInCallback(): Promise<User> {
+  callbackInFlight ??= userManager!.signinRedirectCallback().finally(() => {
+    callbackInFlight = undefined
+  })
+  return callbackInFlight
+}
+
+export function App() {
+  const [user, setUser] = useState<User | null>()
+  const [message, setMessage] = useState('帮我找一台 5000 元以内、16GB 内存、明天能到的轻薄本')
+  const [zone, setZone] = useState('CN-EAST')
+  const [address, setAddress] = useState<DeliveryAddress>()
+  const [run, setRun] = useState<AgentRun>()
+  const [recentRuns, setRecentRuns] = useState<AgentRun[]>([])
+  const [restoreError, setRestoreError] = useState<string>()
+  const mutation = useMutation({
+    mutationFn: (action: () => Promise<AgentRun>) => action(),
+    onSuccess: setRun,
+  })
+  const addressMutation = useMutation({ mutationFn: registerAddress, onSuccess: setAddress })
+
+  // 登录后从服务端恢复地址和最近任务，页面刷新不丢失人工等待状态。
+  useEffect(() => {
+    if (!user) return
+    Promise.all([listAddresses(), listRuns()]).then(([addresses, runs]) => {
+      setAddress(addresses[0])
+      setRecentRuns(runs)
+      setRestoreError(undefined)
+    }).catch((failure: unknown) => {
+      setRestoreError(failure instanceof Error ? failure.message : '无法恢复已有任务和配送地址。')
+    })
+  }, [user])
+
+  useEffect(() => {
+    if (!userManager) {
+      setUser(null)
+      return
+    }
+    if (window.location.pathname === '/auth/callback') {
+      completeSignInCallback()
+        .then((authenticated) => {
+          window.history.replaceState({}, '', '/')
+          setUser(authenticated)
+        })
+        .catch(() => userManager!.getUser()
+          .then((authenticated) => setUser(authenticated?.expired ? null : authenticated)))
+    } else {
+      userManager.getUser().then((authenticated) => setUser(authenticated?.expired ? null : authenticated))
+    }
+  }, [])
+
+  if (authConfigurationError) return <main className="shell"><div className="error">{authConfigurationError}</div></main>
+  if (user === undefined) return <main className="shell"><p>正在检查登录状态…</p></main>
+  if (!user) return <main className="shell login"><h1>BuyForU</h1><p>登录后才能创建和审批订单。</p>
+    <button onClick={() => userManager!.signinRedirect()}>安全登录</button></main>
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    if (address) mutation.mutate(() => startRun(message, address.addressId))
+  }
+
+  return (
+    <main className="shell">
+      <header>
+        <div className="eyebrow">BUYFORU · SAFE SHOPPING AGENT</div>
+        <h1>把复杂购物，变成一次清楚的决定。</h1>
+        <p>Agent 可以搜索和比较；价格、库存与订单始终由商城系统确认。</p>
+        <button className="secondary" onClick={() => userManager!.signoutRedirect()}>退出登录</button>
+      </header>
+
+      <form className="composer" onSubmit={submit}>
+        {!address && <div className="address-row">
+          <select value={zone} onChange={(event) => setZone(event.target.value)}>
+            <option value="CN-EAST">华东（预计 1 天）</option>
+            <option value="CN-CENTRAL">华中（预计 2 天）</option>
+            <option value="CN-WEST">西部（预计 3 天）</option>
+          </select>
+          <button type="button" disabled={addressMutation.isPending}
+                  onClick={() => addressMutation.mutate(zone)}>登记配送区域</button>
+        </div>}
+        {address && <p className="address-ok">配送区域已登记：{address.zoneCode}，地址编号 {address.addressId}</p>}
+        <textarea value={message} onChange={(event) => setMessage(event.target.value)} />
+        <button disabled={mutation.isPending || !address}>开始选购</button>
+      </form>
+
+      {addressMutation.error && <div className="error">{addressMutation.error.message}</div>}
+      {mutation.error && <div className="error">{mutation.error.message}</div>}
+      {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
+      {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
+      {!run && recentRuns.length > 0 && <section className="history">
+        <h2>最近任务</h2>
+        {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
+          onClick={() => setRun(item)}>
+          <span>{item.originalRequest}</span><strong>{item.phase}</strong>
+        </button>)}
+      </section>}
+    </main>
+  )
+}
+
+function RunView({ run, busy, act }: {
+  run: AgentRun
+  busy: boolean
+  act: (action: () => Promise<AgentRun>) => void
+}) {
+  // UI 严格按照后端 phase 显示允许的动作，不能由前端跳过选品或快照确认。
+  const [clarification, setClarification] = useState('')
+  const [relaxation, setRelaxation] = useState('')
+  return (
+    <section className="run">
+      <div className="status"><span />{run.phase}</div>
+      {run.lastError && <p className="error">{run.lastError}</p>}
+
+      {run.phase === 'NEEDS_CLARIFICATION' && (
+        <form className="clarification" onSubmit={(event) => {
+          event.preventDefault()
+          if (clarification.trim()) act(() => clarify(run.runId, clarification.trim()))
+        }}>
+          <h2>还需要一点信息</h2>
+          <p>{run.planSpec?.clarification?.question ?? '请补充缺少的购物条件。'}</p>
+          <textarea value={clarification}
+                    onChange={(event) => setClarification(event.target.value)} />
+          <button disabled={busy || !clarification.trim()}>继续</button>
+          <button type="button" className="secondary" disabled={busy}
+                  onClick={() => act(() => cancelRun(run.runId))}>取消任务</button>
+        </form>
+      )}
+
+      {run.phase === 'PRESENTING_CANDIDATES' && (
+        <div className="grid">
+          {run.candidateSet.map((candidate) => (
+            <article className="card" key={candidate.skuId}>
+              <div className="brand">{candidate.brand}</div>
+              <h2>{candidate.name}</h2>
+              <dl>{Object.entries(candidate.attributes).map(([key, value]) => (
+                <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+              ))}</dl>
+              <strong>¥{candidate.displayPrice.amount}</strong>
+              <p>{candidate.deliveryDate} 送达 · {candidate.available ? '有货' : '暂时缺货'}</p>
+              <button disabled={busy || !candidate.available}
+                      onClick={() => act(() => selectCandidate(run.runId, candidate.skuId))}>
+                选择并锁定库存
+              </button>
+            </article>
+          ))}
+          <button className="secondary" disabled={busy}
+                  onClick={() => act(() => cancelRun(run.runId))}>没有合适商品，取消任务</button>
+        </div>
+      )}
+
+      {run.phase === 'NEEDS_CONSTRAINT_RELAXATION' && (
+        <form className="clarification" onSubmit={(event) => {
+          event.preventDefault()
+          if (relaxation.trim()) act(() => relaxConstraints(run.runId, relaxation.trim()))
+        }}>
+          <h2>当前硬性条件下没有合适商品</h2>
+          <p>只有你明确说明允许修改哪些条件后，Agent 才会重新搜索。</p>
+          <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
+                    onChange={(event) => setRelaxation(event.target.value)} />
+          <button disabled={busy || !relaxation.trim()}>批准这些条件变更</button>
+          <button type="button" className="secondary" disabled={busy}
+                  onClick={() => act(() => cancelRun(run.runId))}>不放宽，取消任务</button>
+        </form>
+      )}
+
+      {run.phase === 'WAITING_APPROVAL' && run.confirmableSnapshot && (
+        <article className="snapshot">
+          <h2>{run.candidateSet[run.selectedCandidateIndex]?.name ?? run.confirmableSnapshot.quote.skuId}</h2>
+          <p>SKU：{run.confirmableSnapshot.quote.skuId} · 数量：{run.confirmableSnapshot.quote.quantity}</p>
+          <p>商品金额：¥{run.confirmableSnapshot.quote.itemAmount.amount}</p>
+          {run.confirmableSnapshot.quote.discounts.map((discount) =>
+            <p key={discount.code}>{discount.description}：-¥{discount.amount.amount}</p>)}
+          <p>运费：¥{run.confirmableSnapshot.quote.shippingFee.amount}</p>
+          <div><span>最终应付</span><strong>¥{run.confirmableSnapshot.quote.payableAmount.amount}</strong></div>
+          <p>预计 {run.confirmableSnapshot.quote.deliveryPromise} 送达</p>
+          <p>库存已临时锁定至 {new Date(run.confirmableSnapshot.expiresAt).toLocaleTimeString()}</p>
+          <div className="actions">
+            <button className="secondary" disabled={busy} onClick={() => act(() => decide(run, 'REJECT'))}>取消</button>
+            <button disabled={busy} onClick={() => act(() => decide(run, 'APPROVE'))}>确认创建订单</button>
+          </div>
+        </article>
+      )}
+
+      {run.phase === 'COMPLETED' && run.finalOrder && (
+        <article className="success">
+          <h2>订单已创建</h2>
+          <p>{run.finalOrder.orderId}</p>
+          <strong>{run.finalOrder.status}</strong>
+        </article>
+      )}
+
+      {run.phase === 'CANCELLED' && <article className="success"><h2>任务已取消</h2>
+        <p>已释放本任务占用的库存，不会创建订单。</p></article>}
+    </section>
+  )
+}

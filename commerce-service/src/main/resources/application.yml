@@ -1,0 +1,53 @@
+# Commerce 服务配置：只提供受保护的 MCP Tools，并持有全部交易事实。
+spring:
+  application:
+    name: buyforu-commerce
+  autoconfigure:
+    exclude: org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+  ai:
+    # Spring AI MCP Server 使用 Streamable HTTP；不开放 prompt/resource 等无关能力。
+    mcp:
+      server:
+        name: buyforu-commerce
+        version: 0.1.0
+        type: SYNC
+        protocol: STREAMABLE
+        capabilities:
+          resource: false
+          prompt: false
+          completion: false
+          tool: true
+        streamable-http:
+          mcp-endpoint: /mcp
+  datasource:
+    # 所有交易表位于 commerce_schema，由 Flyway 独立管理。
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/buyforu}
+    username: ${DB_USER:buyforu}
+    password: ${DB_PASSWORD:buyforu}
+  flyway:
+    default-schema: commerce_schema
+    schemas: commerce_schema
+server:
+  port: ${PORT:8081}
+buyforu:
+  mcp:
+    # Agent 和 Commerce 必须使用同一个长随机服务令牌。
+    service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
+  events:
+    # production profile 必须配置真实 Webhook 和 HMAC 签名密钥。
+    webhook-url: ${EVENT_WEBHOOK_URL:}
+    signing-secret: ${EVENT_SIGNING_SECRET:}
+management:
+  # 只暴露健康、构建信息和 Prometheus 指标。
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}

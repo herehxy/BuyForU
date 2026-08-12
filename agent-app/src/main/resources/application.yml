@@ -1,0 +1,69 @@
+# Agent 服务配置：组合 DeepSeek 规划、Ollama Embedding、Commerce MCP、PostgreSQL 和 OIDC。
+spring:
+  application:
+    name: buyforu-agent
+  ai:
+    # Chat 和 Embedding 使用不同 provider；禁止用本地规则模型替代真实规划。
+    model:
+      chat: openai
+      embedding: ollama
+    openai:
+      api-key: ${DEEPSEEK_API_KEY}
+      chat:
+        base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+        options:
+          model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+          temperature: 0
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      embedding:
+        model: ${OLLAMA_EMBEDDING_MODEL:embeddinggemma}
+        truncate: false
+      init:
+        pull-model-strategy: never
+    mcp:
+      # MCP 仅负责 Agent 到 Commerce 的传输，Tool 自动回调关闭，避免模型自行执行交易写操作。
+      client:
+        type: SYNC
+        toolcallback:
+          enabled: false
+        streamable-http:
+          connections:
+            commerce:
+              url: ${COMMERCE_MCP_URL:http://localhost:8081}
+              endpoint: /mcp
+  datasource:
+    # Agent 状态、记忆、checkpoint、审计和 pgvector 共用 PostgreSQL 的 agent_schema。
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/buyforu}
+    username: ${DB_USER:buyforu}
+    password: ${DB_PASSWORD:buyforu}
+  flyway:
+    default-schema: agent_schema
+    schemas: agent_schema
+  security:
+    # API 是 OAuth2 Resource Server；issuer 与下方 audience 会同时校验。
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8082/realms/buyforu}
+buyforu:
+  security:
+    audience: ${OIDC_AUDIENCE:buyforu-api}
+  mcp:
+    service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
+server:
+  port: ${PORT:8080}
+management:
+  # 健康探针用于编排系统，Prometheus 用于运行指标；不向匿名请求暴露敏感详情。
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
