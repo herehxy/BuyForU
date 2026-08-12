@@ -24,6 +24,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
+import com.buyforu.agent.concurrency.RedisAdmissionController;
 
 /** Agent API 的 Resource Server 配置：同时校验 JWT issuer、audience 和 realm roles。 */
 @Configuration
@@ -43,7 +45,7 @@ public class SecurityConfiguration {
     }
 
     @Bean
-    SecurityFilterChain apiSecurity(HttpSecurity http) throws Exception {
+    SecurityFilterChain apiSecurity(HttpSecurity http, RedisAdmissionController admission) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -54,6 +56,7 @@ public class SecurityConfiguration {
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(resource -> resource.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(authoritiesConverter())))
+                .addFilterAfter(new ReadRateLimitFilter(admission), BearerTokenAuthenticationFilter.class)
                 .build();
     }
 

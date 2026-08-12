@@ -19,6 +19,7 @@
         <langgraph4j.version>1.8.24</langgraph4j.version>
         <mcp.version>2.0.0</mcp.version>
         <spring-ai.version>2.0.0</spring-ai.version>
+        <resilience4j.version>2.3.0</resilience4j.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>${java.version}</maven.compiler.release>
     </properties>
@@ -58,6 +59,14 @@
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
                 <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Resilience4j 不属于 Spring Boot BOM；统一锁定所有隔离与熔断模块的版本。 -->
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-bom</artifactId>
+                <version>${resilience4j.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

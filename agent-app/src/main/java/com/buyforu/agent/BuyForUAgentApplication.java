@@ -6,12 +6,17 @@ import com.buyforu.commerce.port.CommerceGateway;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import com.buyforu.agent.concurrency.ConcurrencyProperties;
 
 /**
  * Agent 服务启动入口。
  * 这里完成最外层依赖装配：应用层依赖 CommerceGateway，实际运行时绑定到 MCP Adapter。
  */
 @SpringBootApplication
+@EnableScheduling
+@EnableConfigurationProperties(ConcurrencyProperties.class)
 public class BuyForUAgentApplication {
     public static void main(String[] args) {
         SpringApplication.run(BuyForUAgentApplication.class, args);

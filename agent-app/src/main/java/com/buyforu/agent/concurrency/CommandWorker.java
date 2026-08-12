@@ -1,0 +1,221 @@
+package com.buyforu.agent.concurrency;
+
+import com.buyforu.agent.application.GraphShoppingWorkflow;
+import com.buyforu.agent.domain.ShoppingAgentState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.ObjectMapper;
+
+import jakarta.annotation.PreDestroy;
+import java.time.Instant;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ConcurrentHashMap;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+
+/**
+ * 公平队列消费者。领取租约的事务在提交后才把任务交给执行器，因此网络等待不占数据库连接。
+ */
+@Component
+public class CommandWorker {
+    private static final Logger log = LoggerFactory.getLogger(CommandWorker.class);
+    private final CommandRepository commands;
+    private final RunLeaseRepository leases;
+    private final RedisFairQueue fairQueue;
+    private final GraphShoppingWorkflow workflow;
+    private final RunEventRepository events;
+    private final ConcurrencyProperties properties;
+    private final ObjectMapper json;
+    private final MeterRegistry meters;
+    private final ExecutorService planning = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService transaction = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService control = Executors.newVirtualThreadPerTaskExecutor();
+    private final Semaphore planningPermits;
+    private final Semaphore transactionPermits;
+    private final Semaphore controlPermits;
+    private final Map<UUID, RunLeaseRepository.Lease> activeLeases = new ConcurrentHashMap<>();
+    private final Map<UUID, Thread> activeThreads = new ConcurrentHashMap<>();
+
+    public CommandWorker(CommandRepository commands, RunLeaseRepository leases, RedisFairQueue fairQueue,
+                         GraphShoppingWorkflow workflow, RunEventRepository events,
+                         ConcurrencyProperties properties, ObjectMapper json, MeterRegistry meters) {
+        this.commands = commands; this.leases = leases; this.fairQueue = fairQueue; this.workflow = workflow;
+        this.events = events; this.properties = properties; this.json = json;
+        this.meters = meters;
+        this.planningPermits = new Semaphore(properties.planningWorkers());
+        this.transactionPermits = new Semaphore(properties.transactionWorkers());
+        this.controlPermits = new Semaphore(properties.controlWorkers());
+    }
+
+    @Scheduled(fixedDelay = 100)
+    void dispatch() {
+        dispatchLane(AgentCommand.QueueClass.PLANNING, planningPermits, planning);
+        dispatchLane(AgentCommand.QueueClass.TRANSACTION, transactionPermits, transaction);
+        if (controlPermits.tryAcquire()) {
+            var ready = commands.controlReady(1);
+            if (ready.isEmpty()) controlPermits.release();
+            else control.submit(() -> execute(ready.getFirst(), controlPermits, false));
+        }
+    }
+
+    @Scheduled(fixedDelay = 5000)
+    void reconcileRedisIndex() {
+        for (var lane : new AgentCommand.QueueClass[]{AgentCommand.QueueClass.PLANNING,
+                AgentCommand.QueueClass.TRANSACTION}) {
+            for (AgentCommand command : commands.queuedWithoutIndex(lane, 500)) {
+                if (command.deadlineAt().isBefore(Instant.now())) commands.markExpired(command.commandId());
+                else try { fairQueue.enqueue(command); } catch (RuntimeException failure) {
+                    log.warn("Could not rebuild fair queue index for command {}", command.commandId(), failure);
+                    break;
+                }
+            }
+        }
+    }
+
+    /** 续租使用独立短事务，绝不和正在进行的网络调用共享连接。 */
+    @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}")
+    void heartbeat() {
+        activeLeases.forEach((commandId, lease) -> {
+            if (leases.cancellationRequested(lease)) {
+                Thread worker = activeThreads.get(commandId);
+                if (worker != null) worker.interrupt();
+            }
+            if (!leases.heartbeat(lease, Instant.now().plus(properties.leaseDuration()))) {
+                activeLeases.remove(commandId);
+            }
+        });
+    }
+
+    @Scheduled(fixedDelay = 3600000)
+    void cleanEvents() {
+        while (events.deleteOlderThan(Instant.now().minusSeconds(7 * 86400L), 1000) == 1000) { }
+    }
+
+    @Scheduled(fixedDelay = 5000)
+    void recoverExpiredLeases() {
+        int recovered = leases.recoverExpired();
+        if (recovered > 0) meters.counter("buyforu_lease_recovered_total").increment(recovered);
+    }
+
+    private void dispatchLane(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor) {
+        if (!permits.tryAcquire()) return;
+        UUID id;
+        try { id = fairQueue.poll(lane); }
+        catch (RuntimeException unavailable) { permits.release(); return; }
+        if (id == null) { permits.release(); return; }
+        AgentCommand command = commands.find(id).orElse(null);
+        if (command == null || (command.status() != AgentCommand.CommandStatus.QUEUED
+                && command.status() != AgentCommand.CommandStatus.RETRY_WAIT)
+                || command.deadlineAt().isBefore(Instant.now())) {
+            if (command != null) commands.markExpired(id);
+            permits.release(); return;
+        }
+        if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
+            fairQueue.enqueue(command); permits.release(); return;
+        }
+        executor.submit(() -> execute(command, permits, true));
+    }
+
+    private void execute(AgentCommand command, Semaphore permit, boolean holdsUserPermit) {
+        RunLeaseRepository.Lease lease = null;
+        Timer.Sample executionSample = Timer.start(meters);
+        try {
+            lease = leases.claim(command, properties.instanceId(), Instant.now().plus(properties.leaseDuration()))
+                    .orElse(null);
+            if (lease == null) return;
+            activeLeases.put(command.commandId(), lease);
+            activeThreads.put(command.commandId(), Thread.currentThread());
+            events.append(command.runId(), command.commandId(), "command.started",
+                    Map.of("attempt", command.attempts() + 1));
+            meters.counter("buyforu_command_started_total", "queue_class", command.queueClass().name()).increment();
+            Timer.builder("buyforu_queue_wait_seconds").tag("queue_class", command.queueClass().name())
+                    .register(meters).record(java.time.Duration.between(command.createdAt(), Instant.now()));
+            RunLeaseRepository.Lease acquired = lease;
+            ShoppingAgentState result = ExecutionContext.call(new ExecutionContext(command.commandId(),
+                    command.runId(), lease.epoch(), command.deadlineAt(), lease.stateVersion()), () -> invoke(command));
+            AgentCommand.CommandStatus terminal = result.phase() == ShoppingAgentState.Phase.CANCELLED
+                    ? AgentCommand.CommandStatus.CANCELLED
+                    : waiting(result) ? AgentCommand.CommandStatus.WAITING_USER : AgentCommand.CommandStatus.SUCCEEDED;
+            commands.markSucceeded(command.commandId(), terminal, null);
+            String eventType = terminal == AgentCommand.CommandStatus.WAITING_USER ? "run.waiting-user"
+                    : terminal == AgentCommand.CommandStatus.CANCELLED ? "command.cancelled" : "command.completed";
+            events.append(command.runId(), command.commandId(), eventType,
+                    Map.of("phase", result.phase().name()));
+        } catch (RunLeaseRepository.ClaimConflict conflict) {
+            log.debug("Command {} was already claimed", command.commandId());
+        } catch (CommandExceptions.StaleExecution stale) {
+            meters.counter("buyforu_fenced_write_rejected_total").increment();
+            log.warn("Stale command {} was fenced", command.commandId());
+        } catch (DependencyExecutor.DependencyTimeoutException | CallNotPermittedException
+                 | BulkheadFullException transientFailure) {
+            if (command.attempts() + 1 < 3 && command.deadlineAt().isAfter(Instant.now().plusSeconds(10))) {
+                commands.retryLater(command.commandId(), Instant.now().plusSeconds(10),
+                        "DEPENDENCY_RETRY_WAIT", safeMessage(transientFailure));
+                events.append(command.runId(), command.commandId(), "command.retry-wait",
+                        Map.of("availableAt", Instant.now().plusSeconds(10).toString()));
+            } else {
+                commands.markFailed(command.commandId(), classify(transientFailure), safeMessage(transientFailure));
+                events.append(command.runId(), command.commandId(), "command.failed",
+                        Map.of("code", classify(transientFailure)));
+            }
+        } catch (RuntimeException failure) {
+            commands.markFailed(command.commandId(), classify(failure), safeMessage(failure));
+            events.append(command.runId(), command.commandId(), "command.failed",
+                    Map.of("code", classify(failure)));
+            log.error("Command {} failed", command.commandId(), failure);
+        } finally {
+            executionSample.stop(Timer.builder("buyforu_command_execution_seconds")
+                    .tag("queue_class", command.queueClass().name()).register(meters));
+            activeLeases.remove(command.commandId());
+            activeThreads.remove(command.commandId());
+            if (lease != null) leases.release(lease);
+            if (holdsUserPermit) {
+                try { fairQueue.releaseUser(command.userId(), command.commandId()); } catch (RuntimeException ignored) { }
+            }
+            permit.release();
+        }
+    }
+
+    private ShoppingAgentState invoke(AgentCommand command) {
+        CommandPayload payload = json.readValue(command.payload(), CommandPayload.class);
+        return switch (command.commandType()) {
+            case START -> workflow.start(payload.conversationId(), command.userId(), payload.message(),
+                    payload.constraints(), command.idempotencyKey());
+            case CLARIFY -> workflow.clarify(command.runId(), command.userId(), payload.message());
+            case SELECT -> workflow.selectCandidate(command.runId(), command.userId(), payload.skuId());
+            case RELAX -> workflow.relax(command.runId(), command.userId(), payload.message());
+            case APPROVE -> workflow.approve(command.runId(), command.userId(), payload.snapshotId(), payload.summaryHash());
+            case REJECT, CANCEL -> workflow.cancel(command.runId(), command.userId());
+        };
+    }
+
+    private static boolean waiting(ShoppingAgentState state) {
+        return switch (state.phase()) {
+            case NEEDS_CLARIFICATION, PRESENTING_CANDIDATES, WAITING_APPROVAL, NEEDS_CONSTRAINT_RELAXATION -> true;
+            default -> false;
+        };
+    }
+
+    private static String classify(Throwable failure) {
+        String name = failure.getClass().getSimpleName();
+        if (name.contains("CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
+        if (name.contains("Timeout")) return "DEPENDENCY_TIMEOUT";
+        return "COMMAND_EXECUTION_FAILED";
+    }
+
+    private static String safeMessage(Throwable failure) {
+        String value = failure.getMessage();
+        return value == null ? failure.getClass().getSimpleName() : value;
+    }
+
+    @PreDestroy
+    void close() { planning.close(); transaction.close(); control.close(); }
+}

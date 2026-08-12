@@ -37,6 +37,19 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/buyforu}
     username: ${DB_USER:buyforu}
     password: ${DB_PASSWORD:buyforu}
+    hikari:
+      # 网络等待不持有数据库连接，因此连接池按短事务吞吐配置而非 LLM 并发配置。
+      maximum-pool-size: ${AGENT_DB_MAX_POOL_SIZE:12}
+      minimum-idle: ${AGENT_DB_MIN_IDLE:2}
+      connection-timeout: ${AGENT_DB_CONNECTION_TIMEOUT_MS:1000}
+      validation-timeout: ${AGENT_DB_VALIDATION_TIMEOUT_MS:500}
+      leak-detection-threshold: ${AGENT_DB_LEAK_DETECTION_MS:5000}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:50ms}
+      timeout: ${REDIS_COMMAND_TIMEOUT:100ms}
   flyway:
     default-schema: agent_schema
     schemas: agent_schema
@@ -51,6 +64,28 @@ buyforu:
     audience: ${OIDC_AUDIENCE:buyforu-api}
   mcp:
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
+  concurrency:
+    instance-id: ${AGENT_INSTANCE_ID:${spring.application.name}-${random.uuid}}
+    lease-duration: ${AGENT_LEASE_DURATION:30s}
+    lease-heartbeat: ${AGENT_LEASE_HEARTBEAT:10s}
+    planning-workers: ${AGENT_PLANNING_WORKERS:20}
+    transaction-workers: ${AGENT_TRANSACTION_WORKERS:16}
+    control-workers: ${AGENT_CONTROL_WORKERS:4}
+    deepseek-concurrency: ${DEEPSEEK_CONCURRENCY:20}
+    mcp-read-concurrency: ${MCP_READ_CONCURRENCY:32}
+    mcp-write-concurrency: ${MCP_WRITE_CONCURRENCY:16}
+    embedding-concurrency: ${EMBEDDING_CONCURRENCY:8}
+    planning-queue-capacity: ${PLANNING_QUEUE_CAPACITY:1500}
+    transaction-queue-capacity: ${TRANSACTION_QUEUE_CAPACITY:500}
+    per-user-queue-capacity: ${PER_USER_QUEUE_CAPACITY:10}
+    planning-user-rate-per-minute: ${PLANNING_USER_RATE_PER_MINUTE:6}
+    planning-user-burst: ${PLANNING_USER_BURST:2}
+    transaction-user-rate-per-minute: ${TRANSACTION_USER_RATE_PER_MINUTE:30}
+    transaction-user-burst: ${TRANSACTION_USER_BURST:10}
+    read-user-rate-per-minute: ${READ_USER_RATE_PER_MINUTE:120}
+    read-user-burst: ${READ_USER_BURST:30}
+    global-write-rate-per-second: ${GLOBAL_WRITE_RATE_PER_SECOND:100}
+    global-write-burst: ${GLOBAL_WRITE_BURST:200}
 server:
   port: ${PORT:8080}
 management:

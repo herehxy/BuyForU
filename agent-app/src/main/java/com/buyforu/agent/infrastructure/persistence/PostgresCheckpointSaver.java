@@ -1,5 +1,7 @@
 package com.buyforu.agent.infrastructure.persistence;
 
+import com.buyforu.agent.concurrency.CommandExceptions.StaleExecution;
+import com.buyforu.agent.concurrency.ExecutionContext;
 import org.bsc.langgraph4j.RunnableConfig;
 import org.bsc.langgraph4j.checkpoint.AbstractCheckpointSaver;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
@@ -66,10 +68,10 @@ public final class PostgresCheckpointSaver extends AbstractCheckpointSaver {
 
     private void upsert(RunnableConfig config, Checkpoint checkpoint) {
         transactions.executeWithoutResult(status -> {
-            jdbc.query("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
-                    preparedStatement -> preparedStatement.setString(1, threadId(config)),
-                    resultSet -> null);
-            jdbc.update("""
+            ExecutionContext execution = ExecutionContext.current();
+            int changed;
+            if (execution == null) {
+                changed = jdbc.update("""
                 INSERT INTO agent_schema.langgraph_checkpoint
                     (thread_id, checkpoint_id, node_id, next_node_id, state, sequence_no)
                 VALUES (?, ?, ?, ?, CAST(? AS jsonb),
@@ -79,7 +81,22 @@ public final class PostgresCheckpointSaver extends AbstractCheckpointSaver {
                     next_node_id = EXCLUDED.next_node_id,
                     state = EXCLUDED.state
                 """, threadId(config), checkpoint.getId(), checkpoint.getNodeId(), checkpoint.getNextNodeId(),
-                    json.writeValueAsString(checkpoint.getState()), threadId(config));
+                        json.writeValueAsString(checkpoint.getState()), threadId(config));
+            } else {
+                changed = jdbc.update("""
+                    INSERT INTO agent_schema.langgraph_checkpoint
+                        (thread_id,checkpoint_id,node_id,next_node_id,state,sequence_no,execution_epoch)
+                    SELECT ?,?,?,?,CAST(? AS jsonb),COALESCE((SELECT MAX(sequence_no)+1 FROM agent_schema.langgraph_checkpoint
+                        WHERE thread_id=?),1),?
+                    WHERE EXISTS (SELECT 1 FROM agent_schema.agent_run_execution x
+                        WHERE x.run_id=? AND x.active_command_id=? AND x.execution_epoch=? AND x.lease_until>now())
+                    ON CONFLICT(thread_id,checkpoint_id) DO UPDATE SET node_id=EXCLUDED.node_id,
+                        next_node_id=EXCLUDED.next_node_id,state=EXCLUDED.state,execution_epoch=EXCLUDED.execution_epoch
+                    """, threadId(config), checkpoint.getId(), checkpoint.getNodeId(), checkpoint.getNextNodeId(),
+                        json.writeValueAsString(checkpoint.getState()), threadId(config), execution.epoch(),
+                        execution.runId(), execution.commandId(), execution.epoch());
+            }
+            if (changed != 1) throw new StaleExecution(threadId(config));
         });
     }
 

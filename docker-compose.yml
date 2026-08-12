@@ -1,5 +1,19 @@
 # 本地基础设施，不包含 Java/React 应用进程；应用可由 IDEA 启动和调试。
 services:
+  redis:
+    # Redis 只保存限流、调度索引和实时通知；命令事实仍由 PostgreSQL 持久化。
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - "6379:6379"
+    volumes:
+      - buyforu-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   postgres:
     # pgvector 镜像同时承载关系事务、Agent checkpoint 和向量知识库。
     image: pgvector/pgvector:pg17
@@ -64,3 +78,4 @@ volumes:
   buyforu-postgres:
   buyforu-keycloak:
   buyforu-ollama:
+  buyforu-redis:

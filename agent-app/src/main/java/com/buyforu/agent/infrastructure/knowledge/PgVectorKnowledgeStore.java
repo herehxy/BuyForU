@@ -6,6 +6,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import com.buyforu.agent.concurrency.DependencyExecutor;
+import java.time.Duration;
 import tools.jackson.databind.ObjectMapper;
 
 import java.net.URI;
@@ -35,24 +38,29 @@ public class PgVectorKnowledgeStore implements KnowledgeRetriever {
     private final ObjectMapper json;
     private final Clock clock;
     private final String embeddingModelName;
+    private final DependencyExecutor dependencies;
+    private final TransactionTemplate transactions;
 
     @Autowired
     public PgVectorKnowledgeStore(JdbcTemplate jdbc, EmbeddingModel embeddingModel, ObjectMapper json,
                                   @org.springframework.beans.factory.annotation.Value("${spring.ai.ollama.embedding.model}")
-                                  String embeddingModelName) {
-        this(jdbc, embeddingModel, json, embeddingModelName, Clock.systemUTC());
+                                  String embeddingModelName, DependencyExecutor dependencies,
+                                  TransactionTemplate transactions) {
+        this(jdbc, embeddingModel, json, embeddingModelName, Clock.systemUTC(), dependencies, transactions);
     }
 
     PgVectorKnowledgeStore(JdbcTemplate jdbc, EmbeddingModel embeddingModel, ObjectMapper json,
-                           String embeddingModelName, Clock clock) {
+                           String embeddingModelName, Clock clock, DependencyExecutor dependencies,
+                           TransactionTemplate transactions) {
         this.jdbc = jdbc;
         this.embeddingModel = embeddingModel;
         this.json = json;
         this.clock = clock;
         this.embeddingModelName = embeddingModelName;
+        this.dependencies = dependencies;
+        this.transactions = transactions;
     }
 
-    @Transactional
     public IndexedDocument index(IndexDocument command, String actorUserId) {
         command.validate();
         if (actorUserId == null || actorUserId.isBlank()) {
@@ -61,12 +69,19 @@ public class PgVectorKnowledgeStore implements KnowledgeRetriever {
         // 同一语料库禁止混用 Embedding 模型，否则不同向量空间的相似度没有意义。
         assertCompatibleCorpus();
         List<String> chunks = chunk(command.content());
-        List<float[]> embeddings = embeddingModel.embed(chunks);
+        // Embedding 在事务外完成，避免 Ollama 网络等待占用 PostgreSQL 连接。
+        List<float[]> embeddings = dependencies.call(DependencyExecutor.Dependency.EMBEDDING,
+                Duration.ofSeconds(10), 1, () -> embeddingModel.embed(chunks));
         if (embeddings.size() != chunks.size()) {
             throw new IllegalStateException("embedding model returned an unexpected result count");
         }
         embeddings.forEach(this::validateEmbedding);
 
+        return transactions.execute(status -> persist(command, actorUserId, chunks, embeddings));
+    }
+
+    private IndexedDocument persist(IndexDocument command, String actorUserId, List<String> chunks,
+                                    List<float[]> embeddings) {
         String documentId = command.documentId() == null || command.documentId().isBlank()
                 ? UUID.randomUUID().toString() : command.documentId();
         List<String> currentVersions = jdbc.query("""
@@ -126,7 +141,8 @@ public class PgVectorKnowledgeStore implements KnowledgeRetriever {
             throw new IllegalArgumentException("minimumScore must be between -1 and 1");
         }
         assertCompatibleCorpus();
-        float[] queryEmbedding = embeddingModel.embed(query);
+        float[] queryEmbedding = dependencies.call(DependencyExecutor.Dependency.EMBEDDING,
+                Duration.ofSeconds(10), 1, () -> embeddingModel.embed(query));
         validateEmbedding(queryEmbedding);
         String vector = vectorLiteral(queryEmbedding);
         return jdbc.query("""

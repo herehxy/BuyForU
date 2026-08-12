@@ -41,3 +41,20 @@ export type AgentRun = {
   finalOrder?: { orderId: string; status: string }
   planSpec?: { clarification?: { required: boolean; question?: string } }
 }
+
+export type CommandAccepted = {
+  commandId: string
+  runId: string
+  status: string
+  queueClass: string
+  acceptedAt: string
+  deadlineAt: string
+  eventUrl: string
+  statusUrl: string
+}
+
+export type AgentCommand = CommandAccepted & {
+  attempts: number
+  errorCode?: string
+  errorDetail?: string
+}

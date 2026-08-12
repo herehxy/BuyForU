@@ -9,5 +9,6 @@ Flyway 已执行迁移的文件内容（包括注释）不能再修改，否则�
 | `V3__embedding_model.sql` | 将向量列改为不限固定维数，并记录模型名与维数 | 防止切换 Embedding 模型后静默混用不同向量空间 |
 | `V4__approval_audit.sql` | 为审批增加用户、决定原因和操作者字段 | 待审批记录使用部分索引，便于恢复及过期处理 |
 | `V5__knowledge_audit.sql` | 建立知识更新审计表 | 只保存正文 SHA-256 摘要，不复制完整知识正文 |
+| `V6__concurrency_governance.sql` | 建立持久化命令、run 租约、execution epoch 和 SSE 事件日志 | PostgreSQL 保存事实；Redis 只保存可重建调度索引，`state_version + execution_epoch` 拒绝旧 Worker 写回 |
 
-修改数据库结构时只能新增更高版本文件，例如 `V6__...sql`，不要回改上述文件。
+修改数据库结构时只能新增更高版本文件，例如 `V7__...sql`，不要回改上述文件。
