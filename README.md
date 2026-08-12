@@ -18,13 +18,17 @@ BuyForU 是一个以真实交易约束为边界的电商购物 Agent。Agent 负
 - 页面刷新后会按 JWT 用户恢复已有配送地址和最近任务；待选择和待审批状态可继续处理。
 - 生产 JAR 不包含任何 InMemory Commerce/Agent Store。内存实现仅存在于 test-jar。
 - Actuator 提供健康探针和 Prometheus 指标；API 错误与响应头包含请求关联编号。
+- Redis Lua Token Bucket 在所有 Agent 实例间统一限流；用户级虚拟时间队列保证高频用户不能垄断执行槽。
+- 写 API 使用 `202 Accepted` 持久化命令；Worker 用 30 秒短租约和 execution epoch 推进固定图，LLM/MCP 等待期间不持有数据库连接。
+- DeepSeek、MCP 读、MCP 写和 Ollama 分别使用虚拟线程执行器、零等待 Bulkhead、硬超时与独立熔断器。
+- 运行事件先写 PostgreSQL，再由 Redis Pub/Sub 唤醒 SSE；浏览器断线后可回放或轮询恢复。
 
 ## 模块与流程
 
 ```text
 commerce-port     交易端口和领域模型，不依赖 MCP
 commerce-service  PostgreSQL 交易事实源和 MCP Server（8081）
-agent-app         Spring AI、pgvector、LangGraph4j、MCP Client、JWT API（8080）
+agent-app         异步命令、公平调度、Spring AI、LangGraph4j、MCP、JWT API（8080）
 web               React + TypeScript + OIDC PKCE（5173）
 infra/keycloak    本地 realm/client 配置，不预置用户密码
 ```
@@ -60,7 +64,7 @@ COMMERCE_MCP_SERVICE_TOKEN=...
 
 `DEEPSEEK_API_KEY` 为空时 Agent 会在启动阶段明确失败，不存在本地规则模型或空结果降级。`production` profile 还必须设置 `EVENT_WEBHOOK_URL` 和至少 32 字符的 `EVENT_SIGNING_SECRET`；订单 Outbox 会用 HMAC-SHA256 签名并重试投递。本地非 production profile 使用显式的本地事件 sink。
 
-启动 PostgreSQL/pgvector、Keycloak 和 Ollama，并拉取固定 embedding 模型：
+启动 PostgreSQL/pgvector、Redis、Keycloak 和 Ollama，并拉取固定 embedding 模型：
 
 ```bash
 docker compose --env-file .env up -d
@@ -97,7 +101,7 @@ npm run dev
 
 1. `POST /api/v1/addresses`：幂等登记已登录用户的配送区域，返回 `addressId`。
 2. `GET /api/v1/addresses`：读取当前用户已有配送地址。
-3. `POST /api/v1/runs`：启动固定图；可能停在补充信息或候选展示。
+3. `POST /api/v1/runs`：携带 `Idempotency-Key`，返回 `202`、`commandId` 和 `runId`。
 4. `GET /api/v1/runs`：读取当前用户最近任务，用于刷新和重启恢复。
 5. `POST /api/v1/runs/{id}/clarifications`：补充缺失条件。
 6. `POST /api/v1/runs/{id}/selection`：选择 SKU，事务性报价与库存预占。
@@ -105,6 +109,10 @@ npm run dev
 8. `POST /api/v1/runs/{id}/constraint-relaxations`：用户明确说明允许修改的硬条件；只能改变文字明确点名的字段。
 9. `POST /api/v1/runs/{id}/cancellations`：在任一人工等待点取消任务；已预占库存会幂等释放。
 10. `GET /api/v1/runs/{id}`：读取持久化运行状态。
+11. `GET /api/v1/commands/{commandId}`：读取 QUEUED、RUNNING、RETRY_WAIT 或终态。
+12. `GET /api/v1/runs/{id}/events`：带 JWT 的可断线续传 SSE；Web 使用 fetch 流而非 URL Token。
+
+除 GET 外的 Agent run 写接口都要求 `Idempotency-Key` 请求头并返回 `202`。Redis 不可用时，新规划和交易命令返回 503；查询及取消仍走 PostgreSQL 控制路径。命令事实、租约、栅栏和 SSE 回放都在 PostgreSQL 中，Redis 数据丢失后会由后台任务重建。
 
 知识管理员先由 Keycloak 管理员显式授予 realm role `knowledge-admin`，再调用 `POST /internal/v1/knowledge/documents` 写入带来源、版本和正文的知识文档；更新已有文档时必须提供当前 `expectedVersion`，以防并发覆盖。服务会真实生成 embedding 并存入 pgvector，并记录操作者、来源和正文摘要。普通 SPA 用户不能自行申请该角色。
 

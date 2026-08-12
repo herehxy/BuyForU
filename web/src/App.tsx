@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import { cancelRun, clarify, decide, followRun, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
 import type { DeliveryAddress } from './api'
-import type { AgentRun } from './types'
+import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
 import { authConfigurationError, userManager } from './auth'
 
@@ -24,8 +24,13 @@ export function App() {
   const [run, setRun] = useState<AgentRun>()
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([])
   const [restoreError, setRestoreError] = useState<string>()
+  const [progress, setProgress] = useState<string>()
   const mutation = useMutation({
-    mutationFn: (action: () => Promise<AgentRun>) => action(),
+    mutationFn: async (action: () => Promise<CommandAccepted>) => {
+      const accepted = await action()
+      setProgress(`命令已进入 ${accepted.queueClass} 公平队列`)
+      return followRun(accepted, setProgress)
+    },
     onSuccess: setRun,
   })
   const addressMutation = useMutation({ mutationFn: registerAddress, onSuccess: setAddress })
@@ -96,6 +101,7 @@ export function App() {
 
       {addressMutation.error && <div className="error">{addressMutation.error.message}</div>}
       {mutation.error && <div className="error">{mutation.error.message}</div>}
+      {mutation.isPending && progress && <div className="status"><span />{progress}</div>}
       {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
       {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
       {!run && recentRuns.length > 0 && <section className="history">
@@ -112,7 +118,7 @@ export function App() {
 function RunView({ run, busy, act }: {
   run: AgentRun
   busy: boolean
-  act: (action: () => Promise<AgentRun>) => void
+  act: (action: () => Promise<CommandAccepted>) => void
 }) {
   // UI 严格按照后端 phase 显示允许的动作，不能由前端跳过选品或快照确认。
   const [clarification, setClarification] = useState('')

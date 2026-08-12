@@ -8,6 +8,8 @@ import tools.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.time.Duration;
+import com.buyforu.agent.concurrency.DependencyExecutor;
 
 /**
  * Spring AI 的 DeepSeek 规划适配器。
@@ -36,11 +38,14 @@ public final class SpringAiPlanningModel implements PlanningModel {
     private final ChatClient chatClient;
     private final ObjectMapper json;
     private final KnowledgeRetriever knowledge;
+    private final DependencyExecutor dependencies;
 
-    public SpringAiPlanningModel(ChatClient.Builder builder, ObjectMapper json, KnowledgeRetriever knowledge) {
+    public SpringAiPlanningModel(ChatClient.Builder builder, ObjectMapper json, KnowledgeRetriever knowledge,
+                                 DependencyExecutor dependencies) {
         this.chatClient = builder.defaultSystem(SYSTEM_PROMPT).build();
         this.json = json;
         this.knowledge = knowledge;
+        this.dependencies = dependencies;
     }
 
     @Override
@@ -100,7 +105,8 @@ public final class SpringAiPlanningModel implements PlanningModel {
         String constraints = explicitConstraints == null ? "null" : json.writeValueAsString(explicitConstraints);
         List<KnowledgeRetriever.KnowledgeHit> evidence = knowledge.retrieve(request, 5, 0.65);
         String knowledgeContext = evidence.isEmpty() ? "[]" : json.writeValueAsString(evidence);
-        PlanSpec plan = chatClient.prompt()
+        PlanSpec plan = dependencies.call(DependencyExecutor.Dependency.DEEPSEEK, Duration.ofSeconds(45), 2,
+                () -> chatClient.prompt()
                 .user(user -> user.text("""
                                 userRequest:
                                 {request}
@@ -126,7 +132,7 @@ public final class SpringAiPlanningModel implements PlanningModel {
                         .param("failure", failureReason == null ? "null" : failureReason)
                         .param("attempt", attempt))
                 .call()
-                .entity(PlanSpec.class, spec -> spec.validateSchema());
+                .entity(PlanSpec.class, spec -> spec.validateSchema()));
         if (plan == null) throw new IllegalStateException("planning model returned no PlanSpec");
         return explicitConstraints == null ? plan : enforceExplicitConstraints(plan, explicitConstraints);
     }

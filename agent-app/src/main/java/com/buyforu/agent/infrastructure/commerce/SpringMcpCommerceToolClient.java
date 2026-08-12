@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import com.buyforu.agent.concurrency.DependencyExecutor;
+import java.time.Duration;
 
 /**
  * MCP SDK 的真实客户端实现：把领域对象编码为 Tool 参数，解析结构化结果，并记录调用摘要。
@@ -25,14 +27,17 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     private final McpSyncClient client;
     private final ObjectMapper json;
     private final ToolCallAudit audit;
+    private final DependencyExecutor dependencies;
 
-    public SpringMcpCommerceToolClient(List<McpSyncClient> clients, ObjectMapper json, ToolCallAudit audit) {
+    public SpringMcpCommerceToolClient(List<McpSyncClient> clients, ObjectMapper json, ToolCallAudit audit,
+                                      DependencyExecutor dependencies) {
         if (clients.size() != 1) {
             throw new IllegalStateException("exactly one Commerce MCP connection is required, found " + clients.size());
         }
         this.client = clients.getFirst();
         this.json = json;
         this.audit = audit;
+        this.dependencies = dependencies;
     }
 
     @Override
@@ -81,7 +86,10 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
                 string(effect, "traceId", "read:" + toolName), string(effect, "effectId", null),
                 json.writeValueAsString(arguments));
         try {
-            CallToolResult result = client.callTool(CallToolRequest.builder().name(toolName).arguments(arguments).build());
+            boolean write = effect != null && !effect.isEmpty();
+            CallToolResult result = dependencies.call(write ? DependencyExecutor.Dependency.MCP_WRITE
+                            : DependencyExecutor.Dependency.MCP_READ, Duration.ofSeconds(write ? 5 : 3), 2,
+                    () -> client.callTool(CallToolRequest.builder().name(toolName).arguments(arguments).build()));
             if (Boolean.TRUE.equals(result.isError())) {
                 String error = String.valueOf(result.content());
                 Matcher code = COMMERCE_CODE.matcher(error);

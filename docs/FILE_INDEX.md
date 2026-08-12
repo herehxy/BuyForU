@@ -7,7 +7,7 @@
 | 文件 | 职责 | 备注 |
 | --- | --- | --- |
 | `pom.xml` | Maven 聚合与版本管理 | 文件内部有 XML 注释 |
-| `docker-compose.yml` | 本地 PostgreSQL、Keycloak、Ollama | 不启动 Java 和 Web 应用 |
+| `docker-compose.yml` | 本地 PostgreSQL、Redis、Keycloak、Ollama | 不启动 Java 和 Web 应用 |
 | `.env.example` | 本地服务端环境变量模板 | 真实 `.env` 被 Git 忽略 |
 | `.gitignore` | 排除密钥、IDE、构建产物 | 规则本身即说明排除对象 |
 | `mvnw` / `mvnw.cmd` | Maven Wrapper 生成脚本 | 第三方生成文件，不手工插入业务注释 |
@@ -30,6 +30,14 @@
 | 目录/文件 | 职责 |
 | --- | --- |
 | `api/*` | JWT 用户入口、请求校验、错误协议、requestId |
+| `api/CommandController.java` | 不暴露 payload 的命令状态查询 |
+| `api/RunEventController.java` | JWT SSE、断点回放和心跳 |
+| `concurrency/CommandService.java` | 准入、幂等、命令落库和调度索引 |
+| `concurrency/CommandWorker.java` | 公平消费、短租约、恢复和状态事件 |
+| `concurrency/RedisAdmissionController.java` | 分布式 Token Bucket 限流 |
+| `concurrency/RedisFairQueue.java` | 用户等权虚拟时间队列 |
+| `concurrency/DependencyExecutor.java` | 下游线程池、Bulkhead、超时与熔断 |
+| `concurrency/RunLeaseRepository.java` | execution epoch 栅栏和崩溃租约恢复 |
 | `application/GraphShoppingWorkflow.java` | 固定图启动、命令幂等和恢复门面 |
 | `application/FixedShoppingGraph.java` | LangGraph4j 固定拓扑和人工中断点 |
 | `application/ShoppingWorkflowService.java` | 规划、搜索、预占、审批、下单和三级 Replan 动作 |
@@ -37,7 +45,7 @@
 | `domain/ShoppingAgentState.java` | 可持久化业务状态 |
 | `domain/PlanSpecValidator.java` | JSON Schema 之后的业务安全校验 |
 | `infrastructure/commerce/*` | MCP Adapter、SDK Client、服务凭证和调用审计 |
-| `infrastructure/persistence/*` | PostgreSQL Run、记忆、checkpoint 和跨实例锁 |
+| `infrastructure/persistence/*` | PostgreSQL Run、记忆和带 execution epoch 的 checkpoint |
 | `infrastructure/knowledge/*` | Embedding、切块、pgvector、召回和知识审计 |
 
 ## Commerce 生产源码

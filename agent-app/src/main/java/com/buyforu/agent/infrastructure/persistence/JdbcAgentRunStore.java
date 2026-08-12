@@ -2,6 +2,8 @@ package com.buyforu.agent.infrastructure.persistence;
 
 import com.buyforu.agent.application.AgentRunStore;
 import com.buyforu.agent.domain.ShoppingAgentState;
+import com.buyforu.agent.concurrency.CommandExceptions.StaleExecution;
+import com.buyforu.agent.concurrency.ExecutionContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,20 +33,13 @@ public class JdbcAgentRunStore implements AgentRunStore {
     @Override
     @Transactional
     public ShoppingAgentState save(ShoppingAgentState state) {
-        // 事务级 advisory lock 防止同一 run 的两个图执行器交错覆盖状态。
-        acquireTransactionLock(state.runId());
         String payload = json.writeValueAsString(state);
-        jdbc.update("""
-                INSERT INTO agent_schema.agent_run
-                    (run_id, conversation_id, user_id, trace_id, phase, state, plan_version, updated_at)
-                VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?)
-                ON CONFLICT (run_id) DO UPDATE SET
-                    phase = EXCLUDED.phase,
-                    state = EXCLUDED.state,
-                    plan_version = EXCLUDED.plan_version,
-                    updated_at = EXCLUDED.updated_at
-                """, state.runId(), state.conversationId(), state.userId(), state.traceId(),
-                state.phase().name(), payload, state.planVersion(), Timestamp.from(state.updatedAt()));
+        ExecutionContext execution = ExecutionContext.current();
+        if (execution == null) {
+            saveWithoutLease(state, payload);
+        } else {
+            saveFenced(state, payload, execution);
+        }
 
         jdbc.update("""
                 INSERT INTO agent_schema.agent_checkpoint (run_id, checkpoint_version, state)
@@ -55,10 +50,46 @@ public class JdbcAgentRunStore implements AgentRunStore {
         return state;
     }
 
-    private void acquireTransactionLock(String runId) {
-        jdbc.query("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
-                preparedStatement -> preparedStatement.setString(1, runId),
-                resultSet -> null);
+    private void saveWithoutLease(ShoppingAgentState state, String payload) {
+        // 单元测试和管理恢复路径不带 Worker 上下文；生产命令执行始终走 saveFenced。
+        jdbc.update("""
+                INSERT INTO agent_schema.agent_run
+                    (run_id, conversation_id, user_id, trace_id, phase, state, plan_version, updated_at,state_version)
+                VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?,0)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    phase = EXCLUDED.phase,
+                    state = EXCLUDED.state,
+                    plan_version = EXCLUDED.plan_version,
+                    state_version = agent_schema.agent_run.state_version + 1,
+                    updated_at = EXCLUDED.updated_at
+                """, state.runId(), state.conversationId(), state.userId(), state.traceId(),
+                state.phase().name(), payload, state.planVersion(), Timestamp.from(state.updatedAt()));
+    }
+
+    private void saveFenced(ShoppingAgentState state, String payload, ExecutionContext execution) {
+        long expectedVersion = execution.expectedStateVersion();
+        int updated = expectedVersion < 0 ? 0 : jdbc.update("""
+                UPDATE agent_schema.agent_run SET phase=?,state=CAST(? AS jsonb),plan_version=?,updated_at=?,
+                    state_version=state_version+1
+                WHERE run_id=? AND state_version=? AND EXISTS (
+                    SELECT 1 FROM agent_schema.agent_run_execution x
+                    WHERE x.run_id=? AND x.active_command_id=? AND x.execution_epoch=? AND x.lease_until>now())
+                """, state.phase().name(), payload, state.planVersion(), Timestamp.from(state.updatedAt()),
+                state.runId(), expectedVersion, state.runId(), execution.commandId(), execution.epoch());
+        if (updated == 0 && expectedVersion < 0) {
+            updated = jdbc.update("""
+                    INSERT INTO agent_schema.agent_run
+                        (run_id,conversation_id,user_id,trace_id,phase,state,plan_version,updated_at,state_version)
+                    SELECT ?,?,?,?,?,CAST(? AS jsonb),?,?,0
+                    WHERE EXISTS (SELECT 1 FROM agent_schema.agent_run_execution x
+                        WHERE x.run_id=? AND x.active_command_id=? AND x.execution_epoch=? AND x.lease_until>now())
+                    ON CONFLICT DO NOTHING
+                    """, state.runId(), state.conversationId(), state.userId(), state.traceId(), state.phase().name(),
+                    payload, state.planVersion(), Timestamp.from(state.updatedAt()), state.runId(),
+                    execution.commandId(), execution.epoch());
+        }
+        if (updated != 1) throw new StaleExecution(state.runId());
+        execution.stateSaved();
     }
 
     @Override

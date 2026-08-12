@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import com.buyforu.agent.concurrency.CommandExceptions;
+import org.springframework.http.ResponseEntity;
 
 /**
  * 将领域错误转换为 RFC 9457 ProblemDetail，并附加 requestId；未知异常只写服务日志，不泄露堆栈。
@@ -53,6 +55,29 @@ public class ApiExceptionHandler {
         detail.setDetail(exception.getMessage());
         addRequestId(detail);
         return detail;
+    }
+
+    @ExceptionHandler(CommandExceptions.IdempotencyConflict.class)
+    ProblemDetail idempotencyConflict(CommandExceptions.IdempotencyConflict exception) {
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.CONFLICT);
+        detail.setTitle("Idempotency conflict"); detail.setDetail(exception.getMessage());
+        addRequestId(detail); return detail;
+    }
+
+    @ExceptionHandler(CommandExceptions.AdmissionRejected.class)
+    ResponseEntity<ProblemDetail> admissionRejected(CommandExceptions.AdmissionRejected exception) {
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.TOO_MANY_REQUESTS);
+        detail.setTitle("Request was not admitted"); detail.setDetail(exception.getMessage()); addRequestId(detail);
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", Long.toString(exception.retryAfterSeconds())).body(detail);
+    }
+
+    @ExceptionHandler(CommandExceptions.CoordinationUnavailable.class)
+    ProblemDetail coordinationUnavailable(CommandExceptions.CoordinationUnavailable exception) {
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        detail.setTitle("Traffic coordination unavailable");
+        detail.setDetail("New expensive commands are temporarily unavailable; queries and cancellation remain available.");
+        addRequestId(detail); return detail;
     }
 
     @ExceptionHandler(SecurityException.class)
