@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
 import type { DeliveryAddress } from './api'
 import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
@@ -107,7 +107,7 @@ export function App() {
       {!run && recentRuns.length > 0 && <section className="history">
         <h2>最近任务</h2>
         {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
-          onClick={() => setRun(item)}>
+          onClick={() => getRun(item.runId).then(setRun).catch(() => setRun(item))}>
           <span>{item.originalRequest}</span><strong>{item.phase}</strong>
         </button>)}
       </section>}
@@ -222,6 +222,8 @@ function RunView({ run, busy, act }: {
           <p>运费：¥{run.confirmableSnapshot.quote.shippingFee.amount}</p>
           <div><span>最终应付</span><strong>¥{run.confirmableSnapshot.quote.payableAmount.amount}</strong></div>
           <p>预计 {run.confirmableSnapshot.quote.deliveryPromise} 送达</p>
+          {run.confirmableSnapshot.quote.observedAt &&
+            <p>价格查询于 {new Date(run.confirmableSnapshot.quote.observedAt).toLocaleString()}</p>}
           <p>库存已临时锁定至 {new Date(run.confirmableSnapshot.expiresAt).toLocaleTimeString()}</p>
           <div className="actions">
             <button className="secondary" disabled={busy} onClick={() => act(() => decide(run, 'REJECT'))}>取消</button>

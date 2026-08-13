@@ -35,11 +35,25 @@ export function getCommand(commandId: string): Promise<AgentCommand> {
   return request(`/api/v1/commands/${commandId}`)
 }
 
-function command(path: string, body?: unknown): Promise<CommandAccepted> {
-  return request(path, {
+// 同一操作复用同一把 key，刷新/连点不会变成两条命令。失败后再换 key。
+function idempotencyKey(op: string, fingerprint: string): string {
+  const store = sessionStorage
+  const slot = `buyforu:idem:${op}:${fingerprint}`
+  const existing = store.getItem(slot)
+  if (existing) return existing
+  const created = crypto.randomUUID()
+  store.setItem(slot, created)
+  return created
+}
+
+function command(path: string, op: string, fingerprint: string, body?: unknown): Promise<CommandAccepted> {
+  return request<CommandAccepted>(path, {
     method: 'POST',
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    headers: { 'Idempotency-Key': idempotencyKey(op, fingerprint) },
     body: body === undefined ? undefined : JSON.stringify(body),
+  }).catch((error: unknown) => {
+    sessionStorage.removeItem(`buyforu:idem:${op}:${fingerprint}`)
+    throw error
   })
 }
 
@@ -50,32 +64,35 @@ export function registerAddress(zoneCode: string): Promise<DeliveryAddress> {
 }
 
 export function startRun(message: string, addressId: string): Promise<CommandAccepted> {
-  return command('/api/v1/runs', {
-      conversationId: crypto.randomUUID(),
+  const conversationId = crypto.randomUUID()
+  return command('/api/v1/runs', 'start', `${conversationId}:${addressId}:${message}`, {
+      conversationId,
       message,
       addressId,
   })
 }
 
 export function selectCandidate(runId: string, skuId: string): Promise<CommandAccepted> {
-  return command(`/api/v1/runs/${runId}/selection`, { skuId })
+  return command(`/api/v1/runs/${runId}/selection`, 'select', `${runId}:${skuId}`, { skuId })
 }
 
 export function clarify(runId: string, message: string): Promise<CommandAccepted> {
-  return command(`/api/v1/runs/${runId}/clarifications`, { message })
+  return command(`/api/v1/runs/${runId}/clarifications`, 'clarify', `${runId}:${message}`, { message })
 }
 
 export function relaxConstraints(runId: string, message: string, fields: string[]): Promise<CommandAccepted> {
-  return command(`/api/v1/runs/${runId}/constraint-relaxations`, { message, fields })
+  return command(`/api/v1/runs/${runId}/constraint-relaxations`, 'relax',
+    `${runId}:${fields.slice().sort().join(',')}:${message}`, { message, fields })
 }
 
 export function cancelRun(runId: string): Promise<CommandAccepted> {
-  return command(`/api/v1/runs/${runId}/cancellations`)
+  return command(`/api/v1/runs/${runId}/cancellations`, 'cancel', runId)
 }
 
 export function decide(run: AgentRun, decision: 'APPROVE' | 'REJECT'): Promise<CommandAccepted> {
   const snapshot = run.confirmableSnapshot!
-  return command(`/api/v1/runs/${run.runId}/approvals`, {
+  return command(`/api/v1/runs/${run.runId}/approvals`, decision.toLowerCase(),
+    `${run.runId}:${decision}:${snapshot.snapshotId}`, {
       decision,
       snapshotId: snapshot.snapshotId,
       expectedSummaryHash: snapshot.summaryHash,
@@ -84,35 +101,44 @@ export function decide(run: AgentRun, decision: 'APPROVE' | 'REJECT'): Promise<C
 
 // 使用 fetch 流而非 EventSource，确保 OIDC Bearer Token 只放在请求头中。
 export async function followRun(command: CommandAccepted, onProgress?: (event: string) => void): Promise<AgentRun> {
-  const token = await accessToken()
-  const response = await fetch(command.eventUrl, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
-  })
-  if (!response.ok || !response.body) return pollUntilTerminal(command, onProgress)
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const frames = buffer.split('\n\n')
-      buffer = frames.pop() ?? ''
-      for (const frame of frames) {
-        const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
-        if (event) onProgress?.(event)
-        if (event === 'command.completed' || event === 'run.waiting-user' || event === 'command.cancelled') {
-          return getRun(command.runId)
-        }
-        if (event === 'command.failed') {
-          const failed = await getCommand(command.commandId)
-          throw new Error(failed.errorDetail ?? failed.errorCode ?? 'Agent command failed')
+  let lastEventId = '0'
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const token = await accessToken()
+    const response = await fetch(command.eventUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/event-stream',
+        'Last-Event-ID': lastEventId,
+      },
+    })
+    if (!response.ok || !response.body) return pollUntilTerminal(command, onProgress)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const id = frame.split('\n').find((line) => line.startsWith('id:'))?.slice(3).trim()
+          if (id) lastEventId = id
+          const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
+          if (event) onProgress?.(event)
+          if (event === 'command.completed' || event === 'run.waiting-user' || event === 'command.cancelled') {
+            return getRun(command.runId)
+          }
+          if (event === 'command.failed') {
+            const failed = await getCommand(command.commandId)
+            throw new Error(failed.errorDetail ?? failed.errorCode ?? 'Agent command failed')
+          }
         }
       }
+    } finally {
+      reader.releaseLock()
     }
-  } finally {
-    reader.releaseLock()
   }
   return pollUntilTerminal(command, onProgress)
 }
