@@ -200,8 +200,9 @@ public class JdbcCommerceEngine implements CommerceGateway {
     public ConfirmableOrderSnapshot prepareConfirmableOrder(PrepareOrderRequest request, EffectContext effect) {
         // ===== 确认前交易准备：重新报价、扣减可售库存、生成预占和不可篡改快照 =====
         assertEffectUser(effect, request.userId());
+        // 预算必须进摘要：同一 effect 改预算不能重放旧快照。
         String requestHash = hash("prepare", request.userId(), request.skuId(),
-                String.valueOf(request.quantity()), request.addressId());
+                String.valueOf(request.quantity()), request.addressId(), budgetKey(request.budgetMax()));
         ConfirmableOrderSnapshot replay = beginEffect(effect, "PREPARE_CONFIRMABLE_ORDER", requestHash,
                 ConfirmableOrderSnapshot.class);
         if (replay != null) return replay;
@@ -479,6 +480,10 @@ public class JdbcCommerceEngine implements CommerceGateway {
 
     private static String normalized(String value) {
         return value == null ? "" : value;
+    }
+
+    private static String budgetKey(Money budgetMax) {
+        return budgetMax == null ? "" : budgetMax.amount().toPlainString() + "\u001f" + budgetMax.currency();
     }
 
     private static String hash(String... values) {

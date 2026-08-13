@@ -73,7 +73,8 @@ public class CommandWorker {
     void reconcileRedisIndex() {
         for (var lane : new AgentCommand.QueueClass[]{AgentCommand.QueueClass.PLANNING,
                 AgentCommand.QueueClass.TRANSACTION}) {
-            for (AgentCommand command : commands.queuedWithoutIndex(lane, 500)) {
+            // 队列上限合计 2000，整表扫一遍即可，Lua 入队会去重，不必再做索引状态表。
+            for (AgentCommand command : commands.queuedWithoutIndex(lane, 2000)) {
                 if (command.deadlineAt().isBefore(Instant.now())) commands.markExpired(command.commandId());
                 else try { fairQueue.enqueue(command); } catch (RuntimeException failure) {
                     log.warn("Could not rebuild fair queue index for command {}", command.commandId(), failure);
@@ -123,7 +124,9 @@ public class CommandWorker {
             permits.release(); return;
         }
         if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
-            fairQueue.enqueue(command); permits.release(); return;
+            fairQueue.enqueueFront(command);
+            permits.release();
+            return;
         }
         executor.submit(() -> execute(command, permits, true));
     }
@@ -142,13 +145,13 @@ public class CommandWorker {
             meters.counter("buyforu_command_started_total", "queue_class", command.queueClass().name()).increment();
             Timer.builder("buyforu_queue_wait_seconds").tag("queue_class", command.queueClass().name())
                     .register(meters).record(java.time.Duration.between(command.createdAt(), Instant.now()));
-            RunLeaseRepository.Lease acquired = lease;
-            ShoppingAgentState result = ExecutionContext.call(new ExecutionContext(command.commandId(),
-                    command.runId(), lease.epoch(), command.deadlineAt(), lease.stateVersion()), () -> invoke(command));
+            ExecutionContext execution = new ExecutionContext(command.commandId(),
+                    command.runId(), lease.epoch(), command.deadlineAt(), lease.stateVersion());
+            ShoppingAgentState result = ExecutionContext.call(execution, () -> invoke(command));
             AgentCommand.CommandStatus terminal = result.phase() == ShoppingAgentState.Phase.CANCELLED
                     ? AgentCommand.CommandStatus.CANCELLED
                     : waiting(result) ? AgentCommand.CommandStatus.WAITING_USER : AgentCommand.CommandStatus.SUCCEEDED;
-            commands.markSucceeded(command.commandId(), terminal, null);
+            commands.markSucceeded(command.commandId(), terminal, execution.expectedStateVersion());
             String eventType = terminal == AgentCommand.CommandStatus.WAITING_USER ? "run.waiting-user"
                     : terminal == AgentCommand.CommandStatus.CANCELLED ? "command.cancelled" : "command.completed";
             events.append(command.runId(), command.commandId(), eventType,

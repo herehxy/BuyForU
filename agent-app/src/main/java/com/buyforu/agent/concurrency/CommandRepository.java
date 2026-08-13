@@ -69,6 +69,7 @@ public class CommandRepository {
         return command;
     }
 
+    /** 重建调度索引时按创建时间捞待执行命令；调用方一次扫完全部有界队列即可。 */
     public List<AgentCommand> queuedWithoutIndex(AgentCommand.QueueClass lane, int limit) {
         return jdbc.query("""
                 SELECT * FROM agent_schema.agent_command
