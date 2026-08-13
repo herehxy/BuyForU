@@ -108,11 +108,16 @@ public final class CommerceModels {
         }
     }
 
+    /**
+     * budgetMax 是应付合计上限（小计 − 优惠 + 运费）。null 表示不限。
+     * 四参数构造留给测试；生产路径由 Agent 传入用户预算。
+     */
     public record PrepareOrderRequest(
             String userId,
             String skuId,
             int quantity,
-            String addressId
+            String addressId,
+            Money budgetMax
     ) {
         public PrepareOrderRequest {
             Objects.requireNonNull(userId, "userId");
@@ -120,6 +125,10 @@ public final class CommerceModels {
             Objects.requireNonNull(addressId, "addressId");
             if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
             if (quantity > 99) throw new IllegalArgumentException("quantity cannot exceed 99");
+        }
+
+        public PrepareOrderRequest(String userId, String skuId, int quantity, String addressId) {
+            this(userId, skuId, quantity, addressId, null);
         }
     }
 

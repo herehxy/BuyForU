@@ -92,6 +92,7 @@ ShoppingWorkflowService.planNewRun
 
 ## 6. 交易安全边界
 
+- `budgetMax` 是应付合计上限（商品小计 − 优惠 + 运费），不是吊牌单价。搜索与快照使用同一套计价；快照在扣库存前若应付超预算则拒绝预占。
 - Agent 只能传递条件、选择和审批证明，不能提供最终金额。
 - `prepareConfirmableOrder` 在同一事务中重新报价、锁库存并生成摘要快照。
 - 用户批准时必须提交当前 `snapshotId + summaryHash`。
