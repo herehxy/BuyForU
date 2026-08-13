@@ -24,6 +24,11 @@
 | `web/package-lock.json` | npm 自动生成的精确依赖锁，不手工编辑 |
 | `web/tsconfig.json` | TypeScript 严格模式、ES2022、Bundler 和 React JSX 配置 |
 | `web/tsconfig.tsbuildinfo` | TypeScript 自动生成的增量编译缓存，可删除重建 |
+| `scripts/accept.sh` | 本地一键验收 |
+| `scripts/k6/` | 公平队列 / SSE / 读路径压测脚本 |
+| `eval/rag/golden-set.json` | RAG 检索评估集，不是生产语料 |
+| `Dockerfile.agent` / `Dockerfile.commerce` / `Dockerfile.web` | 运行镜像 |
+| `.github/workflows/ci.yml` | 单测、集成测试、前端构建 |
 
 ## Agent 生产源码
 
