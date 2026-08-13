@@ -44,7 +44,7 @@ public class RunEventController {
     @GetMapping(path = "/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     SseEmitter stream(@AuthenticationPrincipal Jwt jwt, @PathVariable String runId,
                       @RequestHeader(value = "Last-Event-ID", defaultValue = "0") long lastEventId) {
-        // START 命令被接受后，首个 Agent state 尚未产生；使用持久化命令验证所有权即可立即订阅。
+        // 只认 run 主人（agent_run 或 START 命令），不认“我是否写过任意命令”。
         commands.assertRunOwner(runId, AuthenticatedUser.id(jwt));
         if (!connectionPermits.tryAcquire()) {
             throw new com.buyforu.agent.concurrency.CommandExceptions.AdmissionRejected(
