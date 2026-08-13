@@ -416,7 +416,8 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 WHERE status = 'ACTIVE' AND expires_at <= ?
                 ORDER BY sku_id, reservation_id
                 FOR UPDATE SKIP LOCKED
-                LIMIT """ + limit, Timestamp.from(clock.instant()));
+                LIMIT ?
+                """, Timestamp.from(clock.instant()), limit);
     }
 
     private int expireReservations(String sql, Object... args) {
