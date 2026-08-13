@@ -37,6 +37,8 @@
 | `concurrency/RedisAdmissionController.java` | 分布式 Token Bucket 限流 |
 | `concurrency/RedisFairQueue.java` | 用户等权虚拟时间队列 |
 | `concurrency/DependencyExecutor.java` | 下游线程池、Bulkhead、超时与熔断 |
+| `concurrency/InFlightCallRegistry.java` | 记下命令正在等待的下游 Future，取消时 cancel(true) |
+| `config/SchedulingConfiguration.java` | dispatch / 租约心跳 / 维护任务分线程池 |
 | `concurrency/RunLeaseRepository.java` | execution epoch 栅栏和崩溃租约恢复 |
 | `application/GraphShoppingWorkflow.java` | 固定图启动、命令幂等和恢复门面 |
 | `application/FixedShoppingGraph.java` | LangGraph4j 固定拓扑和人工中断点 |
