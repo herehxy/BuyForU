@@ -2,7 +2,7 @@
 
 BuyForU 是一个以真实交易约束为边界的电商购物 Agent。Agent 负责理解需求、受限规划、检索和推荐；金额、优惠、履约、库存预占与订单创建只由 Commerce Domain 决定。
 
-第一次阅读代码请先看 [中文代码结构导览](docs/CODE_GUIDE.md)，其中包含模块职责、完整调用链、状态机和推荐阅读顺序；需要逐文件查找职责时看 [文件职责索引](docs/FILE_INDEX.md)。
+项目的完整需求边界、架构、一致性、高并发设计和面试问答见 [项目设计与面试指南](docs/PROJECT_DESIGN.md)。第一次阅读代码也可以先看 [中文代码结构导览](docs/CODE_GUIDE.md)；需要逐文件查找职责时看 [文件职责索引](docs/FILE_INDEX.md)。
 
 ## 当前实现
 
@@ -80,7 +80,9 @@ docker compose ps
 
 ```bash
 set -a; source .env; set +a
-./mvnw install -DskipTests
+# 必须先 install。只跑 -pl agent-app 会加载 ~/.m2 里过期的 commerce-port，
+# SearchRequest 增减字段后会变成 NoSuchMethodError。
+./mvnw -pl commerce-port,commerce-service,agent-app -am install -DskipTests
 ./mvnw -pl commerce-service spring-boot:run
 ./mvnw -pl agent-app spring-boot:run
 ```
@@ -93,7 +95,7 @@ npm install
 npm run dev
 ```
 
-先由 Keycloak 管理员在 `http://localhost:8082/admin` 创建并验证用户（默认禁止匿名自助注册），再访问 `http://localhost:5173` 登录、登记配送区域并提交自然语言购物需求。Agent 若缺少品类等信息会暂停询问；选中 SKU 后 Commerce 才会预占库存；最终点击确认才创建订单。
+访问 `http://localhost:5173`，点「安全登录」。登录页可以自己注册账号（本地关闭了邮箱验证）。登记配送区域后提交自然语言购物需求。Agent 若缺少品类等信息会暂停询问；选中 SKU 后 Commerce 才会预占库存；最终点击确认才创建订单。身份仍由 Keycloak 签发 JWT，业务库不存密码。
 
 ## 真实 API 链路
 

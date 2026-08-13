@@ -160,6 +160,10 @@ public class CommandWorker {
             log.debug("Command {} was already claimed", command.commandId());
         } catch (CommandExceptions.StaleExecution stale) {
             meters.counter("buyforu_fenced_write_rejected_total").increment();
+            // 栅栏拒绝意味着该 Worker 已失去写权限，不能让命令继续伪装成 RUNNING。
+            commands.markFailed(command.commandId(), "STALE_EXECUTION", "任务已被更新的执行实例接管");
+            events.append(command.runId(), command.commandId(), "command.failed",
+                    Map.of("code", "STALE_EXECUTION"));
             log.warn("Stale command {} was fenced", command.commandId());
         } catch (DependencyExecutor.DependencyTimeoutException | CallNotPermittedException
                  | BulkheadFullException transientFailure) {

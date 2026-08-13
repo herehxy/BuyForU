@@ -17,6 +17,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.Comparator;
 import java.util.Optional;
@@ -68,7 +69,7 @@ public class ShoppingWorkflowService {
 
     ShoppingAgentState planNewRun(String runId, String traceId, String conversationId, String userId,
                                   String request, PlanSpec.ShoppingConstraints constraints) {
-        // 图节点可能在 checkpoint 写入前重放；已有业务 run 必须直接返回，避免重复写会话和重复调用 LLM。
+        // 图节点可能在 checkpoint 写入前重放；已完成规划的 run 直接返回，避免重复写会话和重复调用 LLM。
         Optional<ShoppingAgentState> existing = store.find(runId);
         if (existing.isPresent()) {
             ShoppingAgentState state = existing.get();
@@ -76,17 +77,36 @@ public class ShoppingWorkflowService {
             if (!state.conversationId().equals(conversationId) || !state.originalRequest().equals(request)) {
                 throw new RunStateConflictException("existing run does not match the original request");
             }
-            return state;
+            // NEW 只是规划前占位。超时重试必须继续调模型，否则会拿空计划去搜商品。
+            if (state.phase() != Phase.NEW) return state;
+            return finishInitialPlan(state, constraints);
         }
         memory.appendUserMessage(conversationId, userId, request);
-        String contextualRequest = contextualRequest(memory.recentUserMessages(conversationId, userId, 8));
+        // 先落 NEW，前端才能在 DeepSeek 返回前刷到进度，而不是一直停在“开始处理”。
+        store.save(new ShoppingAgentState(runId, conversationId, userId, traceId, request,
+                planningPlaceholder(constraints), Phase.NEW, List.of(), -1, null, null, null, 0, 0, 0,
+                null, null, clock.instant()));
+        return finishInitialPlan(store.find(runId).orElseThrow(), constraints);
+    }
+
+    private ShoppingAgentState finishInitialPlan(ShoppingAgentState pending,
+                                                 PlanSpec.ShoppingConstraints constraints) {
+        String contextualRequest = contextualRequest(memory.recentUserMessages(
+                pending.conversationId(), pending.userId(), 8));
         PlanSpec plan = planValidator.validate(planningModel.createPlan(contextualRequest, constraints));
         Phase phase = plan.clarification().required() ? Phase.NEEDS_CLARIFICATION : Phase.SEARCHING;
-        ShoppingAgentState initial = new ShoppingAgentState(runId, conversationId, userId, traceId, request,
-                plan, phase, List.of(), -1, null, null, null, 0, 0, 1,
-                null, null, clock.instant());
-        store.save(initial);
-        return initial;
+        return store.save(new ShoppingAgentState(pending.runId(), pending.conversationId(), pending.userId(),
+                pending.traceId(), pending.originalRequest(), plan, phase, List.of(), -1, null, null, null,
+                0, 0, 1, null, null, clock.instant()));
+    }
+
+    private static PlanSpec planningPlaceholder(PlanSpec.ShoppingConstraints explicit) {
+        PlanSpec.ShoppingConstraints constraints = explicit != null ? explicit
+                : new PlanSpec.ShoppingConstraints("", null, null, null, List.of(), List.of(), Map.of(), 1, null, null, 1);
+        return new PlanSpec(PlanSpec.IntentType.PRODUCT_DISCOVERY, constraints,
+                new PlanSpec.Clarification(true, List.of(), "正在理解你的购物需求"),
+                PlanSpec.SearchStrategy.HYBRID, List.of(), List.of(),
+                PlanSpec.FallbackPolicy.safeDefault(), "planning");
     }
 
     public ShoppingAgentState get(String runId, String userId) {
@@ -180,6 +200,9 @@ public class ShoppingWorkflowService {
 
     ShoppingAgentState prepareSelectedCandidate(String runId, String userId) {
         ShoppingAgentState state = get(runId, userId);
+        // 业务状态可能已保存、图 checkpoint 尚未来得及保存。节点重放时直接返回已推进状态。
+        if (state.phase() == Phase.WAITING_APPROVAL || state.phase() == Phase.PRESENTING_CANDIDATES
+                || state.phase() == Phase.NEEDS_CONSTRAINT_RELAXATION) return state;
         if (state.phase() != Phase.PREPARING_CONFIRMABLE_ORDER || state.selectedCandidateIndex() < 0) {
             throw new RunStateConflictException("run has no selected candidate to prepare");
         }
@@ -203,7 +226,15 @@ public class ShoppingWorkflowService {
             throw new IllegalArgumentException("approval does not match the current snapshot");
         }
         if (!clock.instant().isBefore(snapshot.expiresAt())) {
-            return prepareSnapshot(releaseCurrentReservation(state, "expired-before-approval"));
+            ShoppingAgentState released = releaseCurrentReservation(state, "expired-before-approval");
+            // 过期快照已经是一次完成的副作用。新报价必须推进 planVersion，从而生成新的 effectId；
+            // 否则 Commerce effect ledger 会重放第一次已经过期的快照，形成无限循环。
+            ShoppingAgentState requote = copy(released, Phase.PREPARING_CONFIRMABLE_ORDER,
+                    released.selectedCandidateIndex(), null, null, released.activeEffect(),
+                    released.candidateFallbackCount(), released.searchReplanCount(), released.planVersion() + 1,
+                    "approval snapshot expired; preparing a fresh quote", null);
+            store.save(requote);
+            return prepareSnapshot(requote);
         }
 
         ApprovalProof approval = new ApprovalProof(state.pendingApproval().approvalRequestId(), snapshotId,
@@ -269,6 +300,16 @@ public class ShoppingWorkflowService {
             throw new RunStateConflictException("completed order cannot be cancelled by the shopping workflow");
         }
         if (state.phase() == Phase.CANCELLED) return state;
+        if (state.phase() == Phase.CREATING_ORDER) {
+            // 下单 HTTP 超时代表结果未知。必须先用同一 effectId 恢复订单结果，不能把它伪装成取消成功。
+            throw new RunStateConflictException("order creation is being resolved and cannot be cancelled yet");
+        }
+        if (state.phase() == Phase.PREPARING_CONFIRMABLE_ORDER
+                && state.activeEffect() != null
+                && state.activeEffect().status() == EffectStatus.PENDING_EFFECT) {
+            // 预占请求可能已经在 Commerce 成功。复用原 effectId 取回结果后再幂等释放库存。
+            state = prepareSnapshot(state);
+        }
         if (state.confirmableSnapshot() != null) {
             state = releaseCurrentReservation(state, "user-cancelled");
         }
@@ -280,7 +321,8 @@ public class ShoppingWorkflowService {
     private ShoppingAgentState executeSearch(ShoppingAgentState state) {
         // 搜索只传递用户硬约束；Commerce 会按当前库存数量、价格和履约能力重新筛选。
         PlanSpec.ShoppingConstraints c = state.planSpec().normalizedConstraints();
-        SearchResult result = commerce.searchProducts(new SearchRequest(state.userId(), c.query(), c.category(), c.budgetMax(),
+        SearchResult result = commerce.searchProducts(new SearchRequest(state.userId(), c.query(), c.category(),
+                c.budgetMax(), c.budgetMin(),
                 c.excludedBrands(), c.requiredAttributes(), c.addressId(), c.deliveryBy(), c.quantity(), 10));
         List<ProductCandidate> rankedCandidates = rankCandidates(result.candidates(), state.planSpec());
         if (rankedCandidates.isEmpty()) {
@@ -304,7 +346,12 @@ public class ShoppingWorkflowService {
         Comparator<ProductCandidate> comparator = Comparator.comparing(candidate -> 0);
         for (PlanSpec.RankingPreference preference : plan.rankingPreferences().reversed()) {
             Comparator<ProductCandidate> next = switch (preference) {
-                case PRICE -> Comparator.comparing(candidate -> candidate.displayPrice().amount());
+                case PRICE -> {
+                    boolean floorOnly = constraints.budgetMin() != null && constraints.budgetMax() == null;
+                    Comparator<ProductCandidate> byPrice = Comparator.comparing(
+                            candidate -> candidate.displayPrice().amount());
+                    yield floorOnly ? byPrice.reversed() : byPrice;
+                }
                 case DELIVERY -> Comparator.comparing(ProductCandidate::deliveryDate);
                 case BRAND_PREFERENCE -> Comparator.comparingInt(candidate -> {
                     int index = indexIgnoreCase(constraints.preferredBrands(), candidate.brand());
@@ -341,7 +388,8 @@ public class ShoppingWorkflowService {
         PlanSpec.ShoppingConstraints c = state.planSpec().normalizedConstraints();
         int logicalAttempt = state.candidateFallbackCount();
         String effectId = effectId(state, "prepare-snapshot", logicalAttempt);
-        String requestHash = hash(state.userId(), candidate.skuId(), String.valueOf(c.quantity()), c.addressId());
+        String requestHash = hash(state.userId(), candidate.skuId(), String.valueOf(c.quantity()), c.addressId(),
+                moneyKey(c.budgetMax()), moneyKey(c.budgetMin()));
         // 先把 PENDING_EFFECT 保存，再调用外部 Commerce。崩溃后使用相同 effectId 可重放成功结果。
         ActiveEffect pending = new ActiveEffect(effectId, "PREPARE_CONFIRMABLE_ORDER", requestHash,
                 EffectStatus.PENDING_EFFECT);
@@ -352,7 +400,7 @@ public class ShoppingWorkflowService {
             EffectContext effect = effectContext(state, effectId, "prepare-snapshot", logicalAttempt);
             ConfirmableOrderSnapshot snapshot = commerce.prepareConfirmableOrder(
                     new PrepareOrderRequest(state.userId(), candidate.skuId(), c.quantity(), c.addressId(),
-                            c.budgetMax()), effect);
+                            c.budgetMax(), c.budgetMin()), effect);
             PendingApproval approval = new PendingApproval(UUID.randomUUID().toString(), snapshot.snapshotId(),
                     snapshot.summaryHash(), snapshot.expiresAt());
             ActiveEffect applied = new ActiveEffect(effectId, "PREPARE_CONFIRMABLE_ORDER", requestHash,
@@ -362,7 +410,7 @@ public class ShoppingWorkflowService {
                     state.planVersion(), null, null));
         } catch (CommerceOperationException failure) {
             boolean stockGone = List.of("OUT_OF_STOCK", "SKU_NOT_FOUND").contains(failure.code());
-            boolean overBudget = "BUDGET_EXCEEDED".equals(failure.code());
+            boolean overBudget = List.of("BUDGET_EXCEEDED", "BUDGET_BELOW_MINIMUM").contains(failure.code());
             if (!stockGone && !overBudget) throw failure;
             // 超预算不能靠“换搜索词”偷偷抬预算，只换下一个候选或请用户明确放宽。
             return fallbackAfterPrepareFailure(state, failure.getMessage(), !overBudget);
@@ -422,6 +470,10 @@ public class ShoppingWorkflowService {
     private String effectId(ShoppingAgentState state, String nodeId, int logicalAttempt) {
         // run、节点、计划版本和逻辑尝试共同确定副作用身份；进程重启后计算结果仍相同。
         return hash(state.runId(), nodeId, String.valueOf(state.planVersion()), String.valueOf(logicalAttempt));
+    }
+
+    private static String moneyKey(com.buyforu.commerce.port.model.CommerceModels.Money money) {
+        return money == null ? "" : money.amount().toPlainString() + "\u001f" + money.currency();
     }
 
     private static int indexOfCandidate(List<ProductCandidate> candidates, String skuId) {

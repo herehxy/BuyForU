@@ -51,6 +51,7 @@ public class AgentRunController {
         ShoppingConstraints secured = new ShoppingConstraints(
                 supplied == null ? null : supplied.query(), supplied == null ? null : supplied.category(),
                 supplied == null ? null : supplied.budgetMax(),
+                supplied == null ? null : supplied.budgetMin(),
                 supplied == null ? null : supplied.preferredBrands(),
                 supplied == null ? null : supplied.excludedBrands(),
                 supplied == null ? null : supplied.requiredAttributes(),

@@ -51,6 +51,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .snapshot > div:first-child { display: flex; align-items: end; justify-content: space-between; }
 .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .success { margin-top: 18px; border-color: #90b7a0; }
+.inventory { margin-top: 34px; }
+.inventory-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.inventory h2 { margin: 0; }
+.inventory p { color: #5e675f; font-size: 14px; }
+.inventory-table { border: 1px solid #d8d4c8; border-radius: 14px; overflow: hidden; background: #fffdf7; }
+.inventory-row { display: grid; grid-template-columns: 1.1fr 2.2fr .8fr .8fr .5fr .5fr; gap: 10px;
+  padding: 10px 14px; border-top: 1px solid #ece8df; font-size: 13px; }
+.inventory-row.head { border-top: 0; color: #7a817c; font-weight: 700; background: #f6f3eb; }
+.inventory-row strong { color: #1e6b4f; }
+
 /* 页面刷新后恢复的历史任务列表。 */
 .history { margin-top: 34px; }
 .history-item { width: 100%; display: flex; justify-content: space-between; gap: 20px; margin: 8px 0;

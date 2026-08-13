@@ -11,6 +11,8 @@ import com.buyforu.commerce.port.model.CommerceModels.*;
 public interface CommerceGateway {
     java.util.List<DeliveryAddress> listAddresses(String userId);
 
+    java.util.List<InventoryItem> listInventory();
+
     SearchResult searchProducts(SearchRequest request);
 
     Quote quote(QuoteRequest request);

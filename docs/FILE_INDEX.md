@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `pom.xml` | Maven 聚合与版本管理 | 文件内部有 XML 注释 |
 | `docker-compose.yml` | 本地 PostgreSQL、Redis、Keycloak、Ollama | 不启动 Java 和 Web 应用 |
+| `docs/PROJECT_DESIGN.md` | 完整项目设计、实现边界、运行验收与面试问答 | 以当前分支实际代码为准 |
 | `.env.example` | 本地服务端环境变量模板 | 真实 `.env` 被 Git 忽略 |
 | `.gitignore` | 排除密钥、IDE、构建产物 | 规则本身即说明排除对象 |
 | `mvnw` / `mvnw.cmd` | Maven Wrapper 生成脚本 | 第三方生成文件，不手工插入业务注释 |

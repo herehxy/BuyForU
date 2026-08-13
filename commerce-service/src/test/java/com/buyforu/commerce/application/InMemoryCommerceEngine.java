@@ -66,6 +66,26 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    public List<InventoryItem> listInventory() {
+        expireReservations();
+        return catalog.values().stream()
+                .sorted(Comparator.comparing(CatalogItem::category).thenComparing(CatalogItem::unitPrice)
+                        .thenComparing(CatalogItem::skuId))
+                .map(item -> new InventoryItem(item.skuId(), item.name(), item.brand(), item.category(),
+                        new Money(item.unitPrice(), "CNY"), inventory.getOrDefault(item.skuId(), 0),
+                        reservedQuantity(item.skuId())))
+                .toList();
+    }
+
+    private int reservedQuantity(String skuId) {
+        return reservations.values().stream()
+                .filter(reservation -> reservation.skuId().equals(skuId)
+                        && reservation.status() == ReservationStatus.ACTIVE)
+                .mapToInt(Reservation::quantity)
+                .sum();
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         String q = request.query() == null ? "" : request.query().toLowerCase();
         List<ProductCandidate> matches = catalog.values().stream()
@@ -74,11 +94,16 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 .filter(item -> q.isBlank() || item.name().toLowerCase().contains(q)
                         || item.category().toLowerCase().contains(q))
                 .filter(item -> request.excludedBrands().stream().noneMatch(b -> b.equalsIgnoreCase(item.brand())))
-                .filter(item -> request.requiredAttributes().entrySet().stream()
+                .filter(item -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
+                        .entrySet().stream()
                         .allMatch(e -> e.getValue().equalsIgnoreCase(item.attributes().get(e.getKey()))))
-                .filter(item -> request.budgetMax() == null
-                        || payable(item.unitPrice(), request.quantity())
-                        .compareTo(request.budgetMax().amount()) <= 0)
+                .filter(item -> {
+                    var payableAmount = payable(item.unitPrice(), request.quantity());
+                    if (request.budgetMax() != null && payableAmount.compareTo(request.budgetMax().amount()) > 0) {
+                        return false;
+                    }
+                    return request.budgetMin() == null || payableAmount.compareTo(request.budgetMin().amount()) >= 0;
+                })
                 .sorted(Comparator.comparing(CatalogItem::unitPrice))
                 .limit(request.limit())
                 .map(item -> new ProductCandidate(item.productId(), item.skuId(), item.name(), item.brand(),
@@ -108,7 +133,7 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     public synchronized ConfirmableOrderSnapshot prepareConfirmableOrder(
             PrepareOrderRequest request, EffectContext effectContext) {
         String requestHash = hash("prepare", request.userId(), request.skuId(), String.valueOf(request.quantity()),
-                request.addressId(), budgetKey(request.budgetMax()));
+                request.addressId(), budgetKey(request.budgetMax()), budgetKey(request.budgetMin()));
         return effectLedger.execute(effectContext, "PREPARE_CONFIRMABLE_ORDER", requestHash, () -> {
             expireReservations();
             requireAvailable(request.skuId(), request.quantity());
@@ -118,6 +143,12 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 throw new CommerceException("BUDGET_EXCEEDED",
                         "payable " + quote.payableAmount().amount() + " exceeds budget "
                                 + request.budgetMax().amount());
+            }
+            if (request.budgetMin() != null
+                    && quote.payableAmount().amount().compareTo(request.budgetMin().amount()) < 0) {
+                throw new CommerceException("BUDGET_BELOW_MINIMUM",
+                        "payable " + quote.payableAmount().amount() + " is below budget floor "
+                                + request.budgetMin().amount());
             }
             inventory.compute(request.skuId(), (ignored, stock) -> stock - request.quantity());
             Instant now = clock.instant();

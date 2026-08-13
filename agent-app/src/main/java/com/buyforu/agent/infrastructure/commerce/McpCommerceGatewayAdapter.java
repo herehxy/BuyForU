@@ -21,6 +21,11 @@ public final class McpCommerceGatewayAdapter implements CommerceGateway {
     }
 
     @Override
+    public java.util.List<InventoryItem> listInventory() {
+        return client.inventoryList();
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         return client.catalogSearch(request);
     }

@@ -45,11 +45,24 @@ public final class CommerceModels {
     ) {
     }
 
+    /** 只读库存视图。available 是还能再卖的数量，reserved 是尚未确认的预占。 */
+    public record InventoryItem(
+            String skuId,
+            String name,
+            String brand,
+            String category,
+            Money unitPrice,
+            int availableQuantity,
+            int reservedQuantity
+    ) {
+    }
+
     public record SearchRequest(
             String userId,
             String query,
             String category,
             Money budgetMax,
+            Money budgetMin,
             List<String> excludedBrands,
             Map<String, String> requiredAttributes,
             String addressId,
@@ -65,6 +78,14 @@ public final class CommerceModels {
             if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
             if (quantity > 99) throw new IllegalArgumentException("quantity cannot exceed 99");
             limit = limit <= 0 ? 10 : Math.min(limit, 50);
+        }
+
+        /** 旧调用没有预算下限；保留此重载避免本地 SNAPSHOT 和模块编译顺序不一致。 */
+        public SearchRequest(String userId, String query, String category, Money budgetMax,
+                             List<String> excludedBrands, Map<String, String> requiredAttributes,
+                             String addressId, LocalDate deliveryBy, int quantity, int limit) {
+            this(userId, query, category, budgetMax, null, excludedBrands, requiredAttributes,
+                    addressId, deliveryBy, quantity, limit);
         }
     }
 
@@ -109,15 +130,16 @@ public final class CommerceModels {
     }
 
     /**
-     * budgetMax 是应付合计上限（小计 − 优惠 + 运费）。null 表示不限。
-     * 四参数构造留给测试；生产路径由 Agent 传入用户预算。
+     * budgetMax / budgetMin 是最终应付合计的上下限，必须由 Commerce 在生成快照时重新校验。
+     * 只在搜索时过滤不足以保证正确性，因为价格、优惠和运费可能在选品后变化。
      */
     public record PrepareOrderRequest(
             String userId,
             String skuId,
             int quantity,
             String addressId,
-            Money budgetMax
+            Money budgetMax,
+            Money budgetMin
     ) {
         public PrepareOrderRequest {
             Objects.requireNonNull(userId, "userId");
@@ -128,7 +150,11 @@ public final class CommerceModels {
         }
 
         public PrepareOrderRequest(String userId, String skuId, int quantity, String addressId) {
-            this(userId, skuId, quantity, addressId, null);
+            this(userId, skuId, quantity, addressId, null, null);
+        }
+
+        public PrepareOrderRequest(String userId, String skuId, int quantity, String addressId, Money budgetMax) {
+            this(userId, skuId, quantity, addressId, budgetMax, null);
         }
     }
 

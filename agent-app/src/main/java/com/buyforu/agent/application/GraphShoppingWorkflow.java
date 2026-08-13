@@ -76,7 +76,8 @@ public class GraphShoppingWorkflow {
                 || current.phase() == ShoppingAgentState.Phase.COMPLETED)
                 && current.selectedCandidateIndex() >= 0
                 && current.candidateSet().get(current.selectedCandidateIndex()).skuId().equals(skuId)) {
-            return current;
+            executionLock.execute(runId, () -> recoverIfNecessary(actions.get(runId, userId), null));
+            return actions.get(runId, userId);
         }
         if (current.phase() == ShoppingAgentState.Phase.PREPARING_CONFIRMABLE_ORDER
                 && current.selectedCandidateIndex() >= 0
@@ -96,6 +97,7 @@ public class GraphShoppingWorkflow {
                     && current.confirmableSnapshot().summaryHash().equals(summaryHash)) return current;
             throw new RunStateConflictException("completed run belongs to a different approval snapshot");
         }
+        executionLock.execute(runId, () -> recoverIfNecessary(actions.get(runId, userId), null));
         resume(runId, "awaitApproval", Map.of("approvalRoute", "approved", "snapshotId", snapshotId,
                 "summaryHash", summaryHash));
         return actions.get(runId, userId);
@@ -115,7 +117,7 @@ public class GraphShoppingWorkflow {
             case NEEDS_CONSTRAINT_RELAXATION -> resume(runId, "constraintRelaxation",
                     Map.of("relaxationRoute", "cancel"));
             case COMPLETED -> throw new RunStateConflictException("completed order cannot be cancelled by the agent");
-            default -> throw new RunStateConflictException("run cannot be cancelled while a transition is executing");
+            default -> executionLock.execute(runId, () -> actions.cancel(runId, userId));
         }
         return actions.get(runId, userId);
     }

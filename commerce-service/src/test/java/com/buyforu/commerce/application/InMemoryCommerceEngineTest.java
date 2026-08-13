@@ -92,6 +92,34 @@ class InMemoryCommerceEngineTest {
     }
 
     @Test
+    void snapshotRejectsWhenPayableIsBelowBudgetFloor() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+        CommerceException error = assertThrows(CommerceException.class, () -> engine.prepareConfirmableOrder(
+                new PrepareOrderRequest("u-1", "sku-air-16", 1, "addr-1", Money.cny("6000"), Money.cny("5500")),
+                effect("budget-min-1", "prepare-snapshot", "u-1")));
+        assertEquals("BUDGET_BELOW_MINIMUM", error.code());
+        // 预算校验必须发生在扣库存之前。
+        assertEquals(8, engine.availableStock("sku-air-16"));
+    }
+
+    @Test
+    void listInventoryShowsLockAsReservedNotAvailable() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+        InventoryItem before = engine.listInventory().stream()
+                .filter(item -> item.skuId().equals("sku-air-16")).findFirst().orElseThrow();
+        assertEquals(8, before.availableQuantity());
+        assertEquals(0, before.reservedQuantity());
+
+        engine.prepareConfirmableOrder(new PrepareOrderRequest("u-1", "sku-air-16", 1, "addr-1"),
+                effect("fx-stock", "prepare", "u-1"));
+
+        InventoryItem after = engine.listInventory().stream()
+                .filter(item -> item.skuId().equals("sku-air-16")).findFirst().orElseThrow();
+        assertEquals(7, after.availableQuantity());
+        assertEquals(1, after.reservedQuantity());
+    }
+
+    @Test
     void searchUsesPayableNotListPrice() {
         InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
                 new InMemoryCommerceEngine.CatalogItem("p", "sku-5100", "Promo laptop", "Brand", "laptop",
@@ -100,11 +128,11 @@ class InMemoryCommerceEngineTest {
                         java.util.Map.of(), new java.math.BigDecimal("4999.00"), 3)
         ));
         List<ProductCandidate> underPayable = engine.searchProducts(new SearchRequest("u-1", "", "laptop",
-                Money.cny("5000"), List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
+                Money.cny("5000"), null, List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
         assertEquals(List.of("sku-4999", "sku-5100"), underPayable.stream().map(ProductCandidate::skuId).toList());
 
         List<ProductCandidate> tight = engine.searchProducts(new SearchRequest("u-1", "", "laptop",
-                Money.cny("4000"), List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
+                Money.cny("4000"), null, List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
         assertTrue(tight.isEmpty());
     }
 

@@ -19,7 +19,9 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -64,6 +66,26 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    public List<InventoryItem> listInventory() {
+        return jdbc.query("""
+                SELECT s.sku_id, p.name, p.brand, p.category, s.unit_price, i.available_quantity,
+                       COALESCE((
+                           SELECT SUM(r.quantity)
+                           FROM commerce_schema.inventory_reservation r
+                           WHERE r.sku_id = s.sku_id AND r.status = 'ACTIVE' AND r.expires_at > now()
+                       ), 0) AS reserved_quantity
+                FROM commerce_schema.sku s
+                JOIN commerce_schema.product p ON p.product_id = s.product_id
+                JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
+                WHERE s.status = 'ACTIVE'
+                ORDER BY p.category, s.unit_price, s.sku_id
+                """, (result, row) -> new InventoryItem(
+                result.getString("sku_id"), result.getString("name"), result.getString("brand"),
+                result.getString("category"), new Money(result.getBigDecimal("unit_price"), "CNY"),
+                result.getInt("available_quantity"), result.getInt("reserved_quantity")));
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         LocalDate deliveryDate = resolveDeliveryDate(request.addressId(), request.userId());
         List<ProductCandidate> candidates = jdbc.query("""
@@ -74,25 +96,25 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
                 WHERE s.status = 'ACTIVE'
                   AND (? = '' OR lower(p.category) = lower(?))
-                  AND (? = '' OR lower(p.name) LIKE lower('%' || ? || '%') OR lower(p.category) LIKE lower('%' || ? || '%'))
                 ORDER BY s.unit_price
                 """, (result, row) -> new ProductCandidate(
                         result.getString("product_id"), result.getString("sku_id"), result.getString("name"),
                         result.getString("brand"), readAttributes(result.getString("attributes")),
                         new Money(result.getBigDecimal("unit_price"), "CNY"),
                         result.getInt("available_quantity") >= request.quantity(), deliveryDate),
-                normalized(request.category()), normalized(request.category()), normalized(request.query()),
-                normalized(request.query()), normalized(request.query())).stream()
+                normalized(request.category()), normalized(request.category())).stream()
+                .filter(candidate -> matchesQuery(request.query(), candidate))
                 .filter(candidate -> request.excludedBrands().stream()
                         .noneMatch(brand -> brand.equalsIgnoreCase(candidate.brand())))
-                .filter(candidate -> request.requiredAttributes().entrySet().stream()
+                .filter(candidate -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
+                        .entrySet().stream()
                         .allMatch(entry -> entry.getValue().equalsIgnoreCase(candidate.attributes().get(entry.getKey()))))
                 .filter(candidate -> request.deliveryBy() == null
                         || !candidate.deliveryDate().isAfter(request.deliveryBy()))
                 .filter(ProductCandidate::available)
                 // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
-                .filter(candidate -> withinBudget(candidate.displayPrice().amount(), request.quantity(),
-                        request.budgetMax()))
+                .filter(candidate -> matchesBudget(candidate.displayPrice().amount(), request.quantity(),
+                        request.budgetMax(), request.budgetMin()))
                 .limit(request.limit())
                 .toList();
         return new SearchResult(candidates, clock.instant());
@@ -144,15 +166,20 @@ public class JdbcCommerceEngine implements CommerceGateway {
         return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
     }
 
-    private boolean withinBudget(BigDecimal unitPrice, int quantity, Money budgetMax) {
-        if (budgetMax == null) return true;
-        return priceItems(unitPrice, quantity, clock.instant()).payable().compareTo(budgetMax.amount()) <= 0;
+    private boolean matchesBudget(BigDecimal unitPrice, int quantity, Money budgetMax, Money budgetMin) {
+        BigDecimal payable = priceItems(unitPrice, quantity, clock.instant()).payable();
+        if (budgetMax != null && payable.compareTo(budgetMax.amount()) > 0) return false;
+        return budgetMin == null || payable.compareTo(budgetMin.amount()) >= 0;
     }
 
-    private static void assertWithinBudget(Quote quote, Money budgetMax) {
+    private static void assertWithinBudget(Quote quote, Money budgetMax, Money budgetMin) {
         if (budgetMax != null && quote.payableAmount().amount().compareTo(budgetMax.amount()) > 0) {
             throw new CommerceException("BUDGET_EXCEEDED",
                     "payable " + quote.payableAmount().amount() + " exceeds budget " + budgetMax.amount());
+        }
+        if (budgetMin != null && quote.payableAmount().amount().compareTo(budgetMin.amount()) < 0) {
+            throw new CommerceException("BUDGET_BELOW_MINIMUM",
+                    "payable " + quote.payableAmount().amount() + " is below budget floor " + budgetMin.amount());
         }
     }
 
@@ -202,7 +229,8 @@ public class JdbcCommerceEngine implements CommerceGateway {
         assertEffectUser(effect, request.userId());
         // 预算必须进摘要：同一 effect 改预算不能重放旧快照。
         String requestHash = hash("prepare", request.userId(), request.skuId(),
-                String.valueOf(request.quantity()), request.addressId(), budgetKey(request.budgetMax()));
+                String.valueOf(request.quantity()), request.addressId(), budgetKey(request.budgetMax()),
+                budgetKey(request.budgetMin()));
         ConfirmableOrderSnapshot replay = beginEffect(effect, "PREPARE_CONFIRMABLE_ORDER", requestHash,
                 ConfirmableOrderSnapshot.class);
         if (replay != null) return replay;
@@ -216,7 +244,7 @@ public class JdbcCommerceEngine implements CommerceGateway {
 
         Quote quote = quote(new QuoteRequest(request.skuId(), request.quantity(), request.userId(), request.addressId()));
         // 搜索用的是估算应付；这里用权威报价再卡一次，超预算不扣库存。
-        assertWithinBudget(quote, request.budgetMax());
+        assertWithinBudget(quote, request.budgetMax(), request.budgetMin());
         jdbc.update("""
                 UPDATE commerce_schema.inventory
                 SET available_quantity = available_quantity - ?, version = version + 1 WHERE sku_id = ?
@@ -481,6 +509,28 @@ public class JdbcCommerceEngine implements CommerceGateway {
 
     private static String normalized(String value) {
         return value == null ? "" : value;
+    }
+
+    private static final Set<String> IGNORED_QUERY_TOKENS = Set.of(
+            "以内", "帮我", "一台", "一个", "一下", "可以", "明天", "后天", "送达", "到货");
+
+    // 整句 query 做 LIKE 会搜不到。拆成词，命中名称/品牌/规格任一即可。
+    private static boolean matchesQuery(String query, ProductCandidate candidate) {
+        List<String> tokens = searchTokens(query);
+        if (tokens.isEmpty()) return true;
+        String haystack = (candidate.name() + " " + candidate.brand() + " "
+                + String.join(" ", candidate.attributes().values())).toLowerCase(Locale.ROOT);
+        return tokens.stream().anyMatch(haystack::contains);
+    }
+
+    private static List<String> searchTokens(String query) {
+        if (query == null || query.isBlank()) return List.of();
+        List<String> tokens = new ArrayList<>();
+        for (String raw : query.toLowerCase(Locale.ROOT).split("[^\\p{IsAlphabetic}\\p{IsDigit}]+")) {
+            if (raw.length() < 2 || raw.matches("\\d+") || IGNORED_QUERY_TOKENS.contains(raw)) continue;
+            tokens.add(raw);
+        }
+        return tokens;
     }
 
     private static String budgetKey(Money budgetMax) {

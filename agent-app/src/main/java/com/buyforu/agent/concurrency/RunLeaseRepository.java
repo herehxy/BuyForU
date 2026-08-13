@@ -33,6 +33,24 @@ public class RunLeaseRepository {
         if (row.activeCommandId() != null && row.leaseUntil() != null && row.leaseUntil().isAfter(now)) {
             return Optional.empty();
         }
+        if (row.cancelRequested() && command.queueClass() != AgentCommand.QueueClass.CONTROL) {
+            // CANCEL 已先写入 PostgreSQL。后续普通命令不能因为重新领取租约而把取消标记清掉。
+            jdbc.update("""
+                    UPDATE agent_schema.agent_command SET status='CANCELLED',error_code='RUN_CANCEL_REQUESTED',
+                        completed_at=now() WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT')
+                    """, command.commandId());
+            return Optional.empty();
+        }
+        if (row.activeCommandId() != null) {
+            // 先恢复上一任已过期 Worker，再让新的命令竞争。这样不会覆盖 active_command_id，
+            // 也不会留下一个永远停在 RUNNING 的孤儿命令。
+            int recovered = recoverCommand(row.activeCommandId());
+            jdbc.update("""
+                    UPDATE agent_schema.agent_run_execution SET active_command_id=NULL,lease_owner=NULL,
+                        lease_until=NULL,updated_at=now() WHERE run_id=? AND active_command_id=?
+                    """, command.runId(), row.activeCommandId());
+            if (recovered == 1) return Optional.empty();
+        }
         long epoch = row.epoch() + 1;
         int updated = jdbc.update("""
                 UPDATE agent_schema.agent_run_execution SET execution_epoch=?,active_command_id=?,lease_owner=?,
@@ -68,7 +86,35 @@ public class RunLeaseRepository {
                 UPDATE agent_schema.agent_run_execution SET active_command_id=NULL,lease_owner=NULL,lease_until=NULL,
                     updated_at=now() WHERE active_command_id IS NOT NULL AND lease_until<=now()
                 """);
+        // 防御“租约行已被清掉/覆盖，但命令仍是 RUNNING”的历史数据与异常窗口。
+        recovered += jdbc.update("""
+                UPDATE agent_schema.agent_command c SET
+                    status=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
+                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at
+                                      ELSE now()+interval '1 second' END,
+                    error_code=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
+                                    ELSE 'ORPHAN_RUNNING_COMMAND' END,
+                    completed_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN now() ELSE NULL END
+                WHERE c.status='RUNNING'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_schema.agent_run_execution x
+                      WHERE x.active_command_id=c.command_id AND x.lease_until>now()
+                  )
+                """);
         return recovered;
+    }
+
+    private int recoverCommand(UUID commandId) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET
+                    status=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
+                    available_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN available_at
+                                      ELSE now()+interval '1 second' END,
+                    error_code=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
+                                    ELSE 'WORKER_LEASE_EXPIRED' END,
+                    completed_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN now() ELSE NULL END
+                WHERE command_id=? AND status='RUNNING'
+                """, commandId);
     }
 
     public boolean heartbeat(Lease lease, Instant leaseUntil) {
