@@ -26,12 +26,19 @@ public final class CommerceMcpTools {
         return new AddressList(commerce.listAddresses(userId));
     }
 
+    @McpTool(name = "commerce_inventory_list",
+            description = "List current sellable inventory and active reservations",
+            generateOutputSchema = true)
+    public InventoryList listInventory() {
+        return new InventoryList(commerce.listInventory());
+    }
+
     @McpTool(name = "commerce_catalog_search",
             description = "Search current commerce catalog using explicit shopping constraints",
             generateOutputSchema = true)
     public SearchResult search(@McpToolParam(description = "Validated catalog search request", required = true)
-                               SearchRequest request) {
-        return commerce.searchProducts(request);
+                               CatalogSearchInput request) {
+        return commerce.searchProducts(request.toDomain());
     }
 
     @McpTool(name = "commerce_quote_calculate",
@@ -55,10 +62,10 @@ public final class CommerceMcpTools {
             description = "Atomically calculate quote, reserve inventory and create a confirmable snapshot",
             generateOutputSchema = true)
     public ConfirmableOrderSnapshot prepare(
-            @McpToolParam(description = "Order preparation request", required = true) PrepareOrderRequest request,
+            @McpToolParam(description = "Order preparation request", required = true) PrepareOrderInput request,
             @McpToolParam(description = "Mandatory effect and idempotency context", required = true)
             EffectContext effect) {
-        return commerce.prepareConfirmableOrder(request, effect);
+        return commerce.prepareConfirmableOrder(request.toDomain(), effect);
     }
 
     @McpTool(name = "commerce_inventory_release",
@@ -85,4 +92,47 @@ public final class CommerceMcpTools {
 
     public record ReleaseResult(String reservationId, boolean released) { }
     public record AddressList(java.util.List<DeliveryAddress> addresses) { }
+    public record InventoryList(java.util.List<InventoryItem> items) { }
+
+    /**
+     * MCP 入参单独建模：JSON Schema 默认把 record 字段全标成 required。
+     * deliveryBy / budgetMax 在领域里本来就可空，缺字段必须能搜。
+     */
+    public record CatalogSearchInput(
+            @McpToolParam(description = "Authenticated shopper", required = true) String userId,
+            @McpToolParam(description = "Free-text query", required = false) String query,
+            @McpToolParam(description = "Catalog category", required = false) String category,
+            @McpToolParam(description = "Payable budget ceiling", required = false) Money budgetMax,
+            @McpToolParam(description = "Payable budget floor", required = false) Money budgetMin,
+            @McpToolParam(description = "Brands to exclude", required = false) java.util.List<String> excludedBrands,
+            @McpToolParam(description = "Required product attributes", required = false)
+            java.util.Map<String, String> requiredAttributes,
+            @McpToolParam(description = "Delivery address", required = false) String addressId,
+            @McpToolParam(description = "Latest acceptable delivery date", required = false)
+            java.time.LocalDate deliveryBy,
+            @McpToolParam(description = "Purchase quantity", required = true) int quantity,
+            @McpToolParam(description = "Max candidates", required = false) Integer limit
+    ) {
+        SearchRequest toDomain() {
+            return new SearchRequest(userId, query, category, budgetMax, budgetMin, excludedBrands, requiredAttributes,
+                    addressId, deliveryBy, quantity, limit == null ? 10 : limit);
+        }
+    }
+
+    /**
+     * 确认快照的 MCP 协议 DTO。预算上下限均可选，缺省表示该方向没有硬限制；
+     * 不能直接暴露领域 record，否则 Schema 生成器会把该字段当成必须出现在 JSON 中。
+     */
+    public record PrepareOrderInput(
+            @McpToolParam(description = "Authenticated shopper", required = true) String userId,
+            @McpToolParam(description = "Selected SKU", required = true) String skuId,
+            @McpToolParam(description = "Purchase quantity", required = true) int quantity,
+            @McpToolParam(description = "Authenticated delivery address", required = true) String addressId,
+            @McpToolParam(description = "Optional payable budget ceiling", required = false) Money budgetMax,
+            @McpToolParam(description = "Optional payable budget floor", required = false) Money budgetMin
+    ) {
+        PrepareOrderRequest toDomain() {
+            return new PrepareOrderRequest(userId, skuId, quantity, addressId, budgetMax, budgetMin);
+        }
+    }
 }

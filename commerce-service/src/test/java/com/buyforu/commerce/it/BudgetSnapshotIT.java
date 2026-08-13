@@ -53,7 +53,7 @@ class BudgetSnapshotIT {
     void searchKeepsSkuWhenOnlyPayableFitsBudget() {
         // sku-max-32 吊牌 6299，满减后 6099。预算 6200 时旧逻辑会丢掉它。
         List<String> skuIds = engine.searchProducts(new SearchRequest("u-1", "", "laptop",
-                        Money.cny("6200"), List.of(), java.util.Map.of(), address("u-1"), null, 1, 10))
+                        Money.cny("6200"), null, List.of(), java.util.Map.of(), address("u-1"), null, 1, 10))
                 .candidates().stream().map(ProductCandidate::skuId).toList();
         assertTrue(skuIds.contains("sku-max-32"));
     }

@@ -55,6 +55,20 @@ public class CommandRepository {
         return runOwner(runId).filter(userId::equals).isPresent();
     }
 
+    public boolean runStateExists(String runId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT count(*) FROM agent_schema.agent_run WHERE run_id=?", Integer.class, runId);
+        return count != null && count > 0;
+    }
+
+    public int pendingControlCount(String userId) {
+        Integer count = jdbc.queryForObject("""
+                SELECT count(*) FROM agent_schema.agent_command
+                WHERE user_id=? AND queue_class='CONTROL' AND status IN ('QUEUED','RUNNING','RETRY_WAIT')
+                """, Integer.class, userId);
+        return count == null ? 0 : count;
+    }
+
     @Transactional
     public AgentCommand insert(AgentCommand command) {
         jdbc.update("""
@@ -124,6 +138,22 @@ public class CommandRepository {
         jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,completed_at=now()
                 WHERE command_id=? AND status='QUEUED'
+                """, code, commandId);
+    }
+
+    /** 取消先终止尚未领取的业务命令；正在执行的命令由 cancel_requested + Future interrupt 处理。 */
+    public int cancelPendingForRun(String runId) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='CANCELLED',error_code='RUN_CANCEL_REQUESTED',
+                    completed_at=now()
+                WHERE run_id=? AND queue_class<>'CONTROL' AND status IN ('QUEUED','RETRY_WAIT')
+                """, runId);
+    }
+
+    public void markCancelled(UUID commandId, String code) {
+        jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='CANCELLED',error_code=?,completed_at=now()
+                WHERE command_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT')
                 """, code, commandId);
     }
 

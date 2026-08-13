@@ -6,6 +6,8 @@ import com.buyforu.commerce.port.model.CommerceModels.*;
 public interface CommerceToolClient {
     java.util.List<DeliveryAddress> addressList(String userId);
 
+    java.util.List<InventoryItem> inventoryList();
+
     SearchResult catalogSearch(SearchRequest request);
 
     Quote quoteCalculate(QuoteRequest request);

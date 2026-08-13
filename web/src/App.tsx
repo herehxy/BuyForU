@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listRuns, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
-import type { DeliveryAddress } from './api'
+import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listInventory, listRuns, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import type { DeliveryAddress, InventoryItem } from './api'
 import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
 import { authConfigurationError, userManager } from './auth'
@@ -25,6 +25,8 @@ export function App() {
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([])
   const [restoreError, setRestoreError] = useState<string>()
   const [progress, setProgress] = useState<string>()
+  const [stock, setStock] = useState<InventoryItem[]>([])
+  const refreshStock = () => listInventory().then(setStock).catch(() => undefined)
   const mutation = useMutation({
     mutationFn: async (action: () => Promise<CommandAccepted>) => {
       const accepted = await action()
@@ -34,16 +36,20 @@ export function App() {
         if (update.run) setRun(update.run)
       })
     },
-    onSuccess: setRun,
+    onSuccess: (result) => {
+      setRun(result)
+      refreshStock()
+    },
   })
   const addressMutation = useMutation({ mutationFn: registerAddress, onSuccess: setAddress })
 
   // 登录后从服务端恢复地址和最近任务，页面刷新不丢失人工等待状态。
   useEffect(() => {
     if (!user) return
-    Promise.all([listAddresses(), listRuns()]).then(([addresses, runs]) => {
+    Promise.all([listAddresses(), listRuns(), listInventory()]).then(([addresses, runs, items]) => {
       setAddress(addresses[0])
       setRecentRuns(runs)
+      setStock(items)
       setRestoreError(undefined)
     }).catch((failure: unknown) => {
       setRestoreError(failure instanceof Error ? failure.message : '无法恢复已有任务和配送地址。')
@@ -113,6 +119,7 @@ export function App() {
       )}
       {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
       {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
+      <InventoryBoard items={stock} onRefresh={refreshStock} />
       {!run && recentRuns.length > 0 && <section className="history">
         <h2>最近任务</h2>
         {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
@@ -121,6 +128,33 @@ export function App() {
         </button>)}
       </section>}
     </main>
+  )
+}
+
+function InventoryBoard({ items, onRefresh }: { items: InventoryItem[]; onRefresh: () => void }) {
+  return (
+    <section className="inventory">
+      <div className="inventory-head">
+        <h2>当前库存</h2>
+        <button type="button" className="secondary" onClick={onRefresh}>刷新</button>
+      </div>
+      <p>可售是现在还能买的数量；预占是已锁定、还没下单的件数。下单后预占消失，可售不会加回。</p>
+      <div className="inventory-table">
+        <div className="inventory-row head">
+          <span>SKU</span><span>商品</span><span>品类</span><span>标价</span><span>可售</span><span>预占</span>
+        </div>
+        {items.map((item) => (
+          <div className="inventory-row" key={item.skuId}>
+            <span>{item.skuId}</span>
+            <span>{item.brand} {item.name}</span>
+            <span>{item.category}</span>
+            <span>¥{item.unitPrice.amount}</span>
+            <strong>{item.availableQuantity}</strong>
+            <span>{item.reservedQuantity}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -156,7 +190,8 @@ function pipelineDone(phase: string, stepEnd: string): boolean {
 }
 
 const RELAX_FIELDS = [
-  { id: 'budgetMax', label: '预算' },
+  { id: 'budgetMax', label: '预算上限' },
+  { id: 'budgetMin', label: '预算下限' },
   { id: 'preferredBrands', label: '品牌' },
   { id: 'requiredAttributes', label: '规格' },
   { id: 'deliveryBy', label: '送达时间' },
@@ -220,7 +255,7 @@ function RunView({ run, busy, act }: {
           <p>{run.planSpec?.clarification?.question ?? '请补充缺少的购物条件。'}</p>
           <textarea value={clarification}
                     onChange={(event) => setClarification(event.target.value)} />
-          <button disabled={busy || !clarification.trim()}>继续</button>
+          <button disabled={busy || !clarification.trim()}>{busy ? '正在处理…' : '继续'}</button>
           <button type="button" className="secondary" disabled={busy}
                   onClick={() => act(() => cancelRun(run.runId))}>取消任务</button>
         </form>
@@ -246,6 +281,19 @@ function RunView({ run, busy, act }: {
           <button className="secondary" disabled={busy}
                   onClick={() => act(() => cancelRun(run.runId))}>没有合适商品，取消任务</button>
         </div>
+      )}
+
+      {run.phase === 'PREPARING_CONFIRMABLE_ORDER' && run.selectedCandidateIndex >= 0
+        && run.selectedCandidateIndex < run.candidateSet.length && (
+        <article className="snapshot">
+          <h2>正在锁定库存并生成确认快照</h2>
+          <p>如果上一次调用因网络或 Commerce 协议错误中断，可以安全重试；后端会复用同一个
+            effectId，不会重复预占库存。</p>
+          <button disabled={busy} onClick={() => act(() => selectCandidate(
+            run.runId, run.candidateSet[run.selectedCandidateIndex].skuId))}>
+            {busy ? '正在处理…' : '重试锁定库存'}
+          </button>
+        </article>
       )}
 
       {run.phase === 'NEEDS_CONSTRAINT_RELAXATION' && (

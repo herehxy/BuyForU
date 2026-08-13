@@ -11,6 +11,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.time.ZoneId;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -112,6 +114,31 @@ class ShoppingWorkflowServiceTest {
     }
 
     @Test
+    void expiredApprovalCreatesFreshSnapshotInsteadOfReplayingExpiredEffect() {
+        MutableClock mutableClock = new MutableClock(Instant.parse("2026-08-12T08:00:00Z"));
+        InMemoryCommerceEngine commerce = InMemoryCommerceEngine.seeded(mutableClock);
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce,
+                new DeterministicPlanningModel(), new InMemoryAgentRunStore(), new InMemoryConversationMemory(),
+                mutableClock);
+
+        ShoppingAgentState searched = workflow.start("conversation-expired", "user-1", "laptop", constraints());
+        ShoppingAgentState first = workflow.selectCandidate(searched.runId(), "user-1",
+                searched.candidateSet().getFirst().skuId());
+        mutableClock.advance(Duration.ofMinutes(6));
+
+        ShoppingAgentState refreshed = workflow.approve(first.runId(), "user-1",
+                first.confirmableSnapshot().snapshotId(), first.confirmableSnapshot().summaryHash());
+        assertEquals(ShoppingAgentState.Phase.WAITING_APPROVAL, refreshed.phase());
+        assertNotEquals(first.confirmableSnapshot().snapshotId(), refreshed.confirmableSnapshot().snapshotId());
+        assertEquals(first.planVersion() + 1, refreshed.planVersion());
+
+        ShoppingAgentState completed = workflow.approve(refreshed.runId(), "user-1",
+                refreshed.confirmableSnapshot().snapshotId(), refreshed.confirmableSnapshot().summaryHash());
+        assertEquals(ShoppingAgentState.Phase.COMPLETED, completed.phase());
+        assertEquals(1, commerce.orderCount());
+    }
+
+    @Test
     void acceptsClarificationAndContinuesSearch() {
         PlanningModel model = new PlanningModel() {
             private final DeterministicPlanningModel delegate = new DeterministicPlanningModel();
@@ -149,8 +176,76 @@ class ShoppingWorkflowServiceTest {
         assertEquals("laptop", searched.originalRequest());
     }
 
+    @Test
+    void continuesPlanningAfterPersistedNewPlaceholder() {
+        InMemoryAgentRunStore store = new InMemoryAgentRunStore();
+        AtomicBoolean failOnce = new AtomicBoolean(true);
+        PlanningModel model = new PlanningModel() {
+            private final DeterministicPlanningModel delegate = new DeterministicPlanningModel();
+
+            @Override
+            public PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints constraints) {
+                if (failOnce.compareAndSet(true, false)) {
+                    throw new IllegalStateException("simulated planning timeout");
+                }
+                return delegate.createPlan(request, constraints);
+            }
+
+            @Override
+            public PlanSpec replan(String request, PlanSpec.ShoppingConstraints constraints,
+                                   String reason, int attempt) {
+                return delegate.replan(request, constraints, reason, attempt);
+            }
+
+            @Override
+            public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints,
+                                              String instruction, List<String> fields) {
+                return delegate.relaxConstraints(request, constraints, instruction, fields);
+            }
+        };
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),
+                model, store, new InMemoryConversationMemory(), clock);
+
+        assertThrows(IllegalStateException.class,
+                () -> workflow.planNewRun("run-new", "trace", "conversation", "user", "laptop", constraints()));
+        assertEquals(ShoppingAgentState.Phase.NEW, store.find("run-new").orElseThrow().phase());
+
+        ShoppingAgentState planned = workflow.planNewRun("run-new", "trace", "conversation", "user",
+                "laptop", constraints());
+        assertEquals(ShoppingAgentState.Phase.SEARCHING, planned.phase());
+        assertTrue(planned.planSpec().readTasks().contains(PlanSpec.ReadTask.SEARCH_PRODUCTS));
+    }
+
     private PlanSpec.ShoppingConstraints constraints() {
-        return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), List.of(), List.of(),
+        return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), null, List.of(), List.of(),
                 Map.of("memory", "16GB"), 1, "address-1", LocalDate.of(2026, 8, 13), 1);
+    }
+
+    /** 可控时钟让快照过期测试不依赖 sleep，测试速度和结果都保持稳定。 */
+    private static final class MutableClock extends Clock {
+        private Instant instant;
+
+        private MutableClock(Instant instant) {
+            this.instant = instant;
+        }
+
+        private void advance(Duration duration) {
+            instant = instant.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
     }
 }

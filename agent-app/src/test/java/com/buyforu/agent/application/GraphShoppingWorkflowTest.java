@@ -31,7 +31,7 @@ class GraphShoppingWorkflowTest {
         GraphShoppingWorkflow workflow = new GraphShoppingWorkflow(
                 new FixedShoppingGraph(new MemorySaver(), actions, json), actions, json,
                 (runId, action) -> action.run());
-        var constraints = new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), List.of(),
+        var constraints = new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), null, List.of(),
                 List.of(), Map.of("memory", "16GB"), 1, "address-1", LocalDate.of(2026, 8, 13), 1);
 
         ShoppingAgentState candidates = workflow.start("conversation", "user", "5000元以内的笔记本", constraints,

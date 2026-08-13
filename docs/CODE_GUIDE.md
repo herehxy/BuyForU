@@ -45,7 +45,8 @@ infrastructure  Outbox 投递、预占过期任务、生产 Webhook
 ```text
 React 页面
   -> AgentRunController（从 JWT sub 获取 userId）
-  -> GraphShoppingWorkflow（幂等 runId + PostgreSQL 执行锁）
+  -> GraphShoppingWorkflow（幂等 runId + 固定图启动/恢复）
+  -> CommandWorker / RunLeaseRepository（短租约 + execution epoch 串行推进）
   -> FixedShoppingGraph（固定拓扑和 checkpoint）
   -> ShoppingWorkflowService（图节点动作）
   -> CommerceGateway（应用层端口）

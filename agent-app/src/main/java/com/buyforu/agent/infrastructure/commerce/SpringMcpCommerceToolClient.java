@@ -46,6 +46,11 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     }
 
     @Override
+    public List<InventoryItem> inventoryList() {
+        return call("commerce_inventory_list", Map.of(), InventoryList.class).items();
+    }
+
+    @Override
     public SearchResult catalogSearch(SearchRequest request) {
         return call("commerce_catalog_search", Map.of("request", arguments(request)), SearchResult.class);
     }
@@ -123,4 +128,5 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
 
     private record ReleaseResult(String reservationId, boolean released) { }
     private record AddressList(List<DeliveryAddress> addresses) { }
+    private record InventoryList(List<InventoryItem> items) { }
 }

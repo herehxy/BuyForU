@@ -43,6 +43,10 @@ public class CommandService {
         var existing = commands.findByIdempotency(userId, runId, idempotencyKey);
         if (existing.isPresent()) return replay(existing.get(), runId, requestHash);
 
+        if (lane == QueueClass.CONTROL && commands.pendingControlCount(userId) >= 10) {
+            throw new CommandExceptions.AdmissionRejected("too many pending control commands", 5);
+        }
+
         admission.admit(userId, remoteAddress, lane);
         Instant now = Instant.now();
         Duration total = switch (lane) {
@@ -60,6 +64,7 @@ public class CommandService {
         }
         try {
             if (lane == QueueClass.CONTROL) {
+                if (type == CommandType.CANCEL) commands.cancelPendingForRun(runId);
                 leases.requestCancellation(runId);
             } else {
                 fairQueue.enqueue(command);
@@ -71,6 +76,14 @@ public class CommandService {
         }
         events.append(runId, command.commandId(), "command.accepted",
                 java.util.Map.of("status", command.status().name(), "queueClass", lane.name()));
+        if (type == CommandType.CANCEL && !commands.runStateExists(runId)) {
+            // START 仍在队列且尚未创建 agent_run 时，取消持久化命令本身就是完整结果，
+            // 无需让控制 Worker 去读取一个尚不存在的业务状态。
+            commands.markCancelled(command.commandId(), "RUN_CANCELLED_BEFORE_START");
+            events.append(runId, command.commandId(), "command.cancelled",
+                    java.util.Map.of("phase", "CANCELLED"));
+            return CommandAccepted.from(commands.find(command.commandId()).orElseThrow());
+        }
         return CommandAccepted.from(command);
     }
 

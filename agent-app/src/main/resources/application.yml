@@ -14,6 +14,10 @@ spring:
         options:
           model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
           temperature: 0
+          # V4 默认 thinking=high。规划只要 PlanSpec JSON，必须关掉，否则会超过 45 秒硬超时。
+          extra-body:
+            thinking:
+              type: disabled
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       embedding:

@@ -1,4 +1,4 @@
-import type { AgentCommand, AgentRun, CommandAccepted } from './types'
+import type { AgentCommand, AgentRun, CommandAccepted, Money } from './types'
 import { accessToken } from './auth'
 
 // 唯一的前端请求入口：统一附加 OIDC access token，并把服务端 requestId 带入可见错误。
@@ -21,6 +21,20 @@ export type DeliveryAddress = { addressId: string; zoneCode: string; deliveryDay
 
 export function listAddresses(): Promise<DeliveryAddress[]> {
   return request('/api/v1/addresses')
+}
+
+export type InventoryItem = {
+  skuId: string
+  name: string
+  brand: string
+  category: string
+  unitPrice: Money
+  availableQuantity: number
+  reservedQuantity: number
+}
+
+export function listInventory(): Promise<InventoryItem[]> {
+  return request('/api/v1/inventory')
 }
 
 export function listRuns(): Promise<AgentRun[]> {
@@ -47,14 +61,27 @@ function idempotencyKey(op: string, fingerprint: string): string {
 }
 
 function command(path: string, op: string, fingerprint: string, body?: unknown): Promise<CommandAccepted> {
+  const slot = `buyforu:idem:${op}:${fingerprint}`
   return request<CommandAccepted>(path, {
     method: 'POST',
     headers: { 'Idempotency-Key': idempotencyKey(op, fingerprint) },
     body: body === undefined ? undefined : JSON.stringify(body),
+  }).then((accepted) => {
+    // 记录 command 与幂等槽的关系；后台执行失败后，下一次人工重试必须生成新 key，
+    // 不能永远重放已经 FAILED 的旧命令。
+    sessionStorage.setItem(`buyforu:command-slot:${accepted.commandId}`, slot)
+    return accepted
   }).catch((error: unknown) => {
-    sessionStorage.removeItem(`buyforu:idem:${op}:${fingerprint}`)
+    sessionStorage.removeItem(slot)
     throw error
   })
+}
+
+function finishIdempotencySlot(commandId: string, allowNewAttempt: boolean): void {
+  const commandSlot = `buyforu:command-slot:${commandId}`
+  const slot = sessionStorage.getItem(commandSlot)
+  if (allowNewAttempt && slot) sessionStorage.removeItem(slot)
+  sessionStorage.removeItem(commandSlot)
 }
 
 export function registerAddress(zoneCode: string): Promise<DeliveryAddress> {
@@ -101,79 +128,39 @@ export function decide(run: AgentRun, decision: 'APPROVE' | 'REJECT'): Promise<C
 
 export type ProgressUpdate = { label: string; run?: AgentRun }
 
-// 命令事件只说明调度，业务进度以 run.phase 为准。
+// 完成与否看这一条命令的 status。SSE 会回放同一 run 的旧 waiting-user，不能当“这次点继续已经结束”。
 export async function followRun(
   command: CommandAccepted,
   onProgress?: (update: ProgressUpdate) => void,
 ): Promise<AgentRun> {
-  const publish = async (label: string) => {
-    const run = await getRun(command.runId).catch(() => undefined)
-    onProgress?.({ label: run ? phaseLabel(run.phase) : label, run })
-    return run
-  }
-
-  let lastEventId = '0'
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const token = await accessToken()
-    const response = await fetch(command.eventUrl, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'text/event-stream',
-        'Last-Event-ID': lastEventId,
-      },
-    })
-    if (!response.ok || !response.body) return pollUntilTerminal(command, onProgress)
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-        for (const frame of frames) {
-          const id = frame.split('\n').find((line) => line.startsWith('id:'))?.slice(3).trim()
-          if (id) lastEventId = id
-          const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
-          if (!event || event === 'heartbeat') continue
-          const run = await publish(commandEventLabel(event))
-          if (event === 'command.completed' || event === 'run.waiting-user' || event === 'command.cancelled') {
-            return run ?? getRun(command.runId)
-          }
-          if (event === 'command.failed') {
-            const failed = await getCommand(command.commandId)
-            throw new Error(failed.errorDetail ?? failed.errorCode ?? 'Agent command failed')
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
-  return pollUntilTerminal(command, onProgress)
-}
-
-async function pollUntilTerminal(
-  command: CommandAccepted,
-  onProgress?: (update: ProgressUpdate) => void,
-): Promise<AgentRun> {
-  let delay = 500
+  let delay = 400
   while (Date.now() < new Date(command.deadlineAt).getTime() + 5000) {
     const current = await getCommand(command.commandId)
     const run = await getRun(command.runId).catch(() => undefined)
-    onProgress?.({ label: run ? phaseLabel(run.phase) : commandEventLabel(`command.${current.status.toLowerCase()}`), run })
+    onProgress?.({ label: progressLabel(current.status, run), run })
     if (current.status === 'SUCCEEDED' || current.status === 'WAITING_USER' || current.status === 'CANCELLED') {
+      finishIdempotencySlot(command.commandId, false)
       return run ?? getRun(command.runId)
     }
     if (current.status === 'FAILED' || current.status === 'EXPIRED') {
+      finishIdempotencySlot(command.commandId, true)
       throw new Error(current.errorDetail ?? current.errorCode ?? 'Agent command failed')
     }
     await new Promise((resolve) => setTimeout(resolve, delay))
-    delay = Math.min(delay * 1.5, 5000)
+    delay = Math.min(Math.round(delay * 1.4), 2000)
   }
   throw new Error('Agent command exceeded its deadline')
+}
+
+function progressLabel(status: string, run?: AgentRun): string {
+  if (status === 'RETRY_WAIT') return '下游繁忙，稍后重试'
+  if (status === 'QUEUED') return '任务已排队，等待执行'
+  if (status === 'RUNNING') {
+    if (run?.phase === 'NEEDS_CLARIFICATION') return '正在根据补充信息重新规划'
+    if (run?.phase === 'NEW') return '正在理解需求并规划'
+    return 'Agent 正在处理'
+  }
+  return run ? phaseLabel(run.phase) : '正在处理…'
 }
 
 export function phaseLabel(phase: string): string {
@@ -181,7 +168,7 @@ export function phaseLabel(phase: string): string {
 }
 
 const PHASE_LABELS: Record<string, string> = {
-  NEW: '已接收需求',
+  NEW: '正在理解需求并规划',
   NEEDS_CLARIFICATION: '需要你补充信息',
   SEARCHING: '正在搜索商品',
   PRESENTING_CANDIDATES: '请选择商品',
@@ -192,17 +179,4 @@ const PHASE_LABELS: Record<string, string> = {
   COMPLETED: '订单已创建',
   CANCELLED: '任务已取消',
   FAILED: '处理失败',
-}
-
-function commandEventLabel(event: string): string {
-  switch (event) {
-    case 'command.accepted': return '任务已排队，等待执行'
-    case 'command.started': return 'Agent 开始处理'
-    case 'command.retry-wait': return '下游繁忙，稍后重试'
-    case 'command.completed': return '这一步已完成'
-    case 'run.waiting-user': return '等待你操作'
-    case 'command.cancelled': return '任务已取消'
-    case 'command.failed': return '处理失败'
-    default: return '正在处理…'
-  }
 }

@@ -25,6 +25,15 @@ public record PlanSpec(
     public PlanSpec {
         readTasks = readTasks == null ? List.of() : List.copyOf(readTasks);
         rankingPreferences = rankingPreferences == null ? List.of() : List.copyOf(rankingPreferences);
+        // 模型经常省略 clarification / fallbackPolicy。缺省视为“可执行、不澄清”。
+        if (intentType == null) intentType = IntentType.PRODUCT_DISCOVERY;
+        if (normalizedConstraints == null) {
+            normalizedConstraints = new ShoppingConstraints(null, null, null, null,
+                    List.of(), List.of(), Map.of(), 1, null, null, 1);
+        }
+        if (clarification == null) clarification = new Clarification(false, List.of(), null);
+        if (fallbackPolicy == null) fallbackPolicy = FallbackPolicy.safeDefault();
+        if (searchStrategy == null) searchStrategy = SearchStrategy.HYBRID;
     }
 
     public enum IntentType { PRODUCT_DISCOVERY, PRODUCT_COMPARISON, PURCHASE }
@@ -55,12 +64,14 @@ public record PlanSpec(
 
     /**
      * 用户明确表达并经应用合并后的硬约束；version 用于追踪每次受控变更。
-     * budgetMax 是应付合计上限（小计 − 优惠 + 运费），不是吊牌单价上限。
+     * budgetMax 是应付合计上限，budgetMin 是应付合计下限。
+     * 「5000 以内」只写 max，「7000 以上」只写 min，两者不能对调。
      */
     public record ShoppingConstraints(
             String query,
             String category,
             Money budgetMax,
+            Money budgetMin,
             List<String> preferredBrands,
             List<String> excludedBrands,
             Map<String, String> requiredAttributes,
