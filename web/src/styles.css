@@ -27,6 +27,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .secondary { color: #25332b; background: #e7e4db; }
 
 /* Agent 阶段、候选商品和人工确认快照。 */
+.progress { margin: 8px 0 22px; }
+.steps { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 12px 0 0; list-style: none; }
+.steps li { padding: 6px 12px; border-radius: 999px; background: #e7e4db; color: #5e675f; font-size: 13px; font-weight: 700; }
+.steps li.active { background: #1e6b4f; color: white; }
+.steps li.done { background: #cfe3d8; color: #1e6b4f; }
+.phase-copy { margin: 0 0 8px; color: #1e6b4f; font-weight: 700; }
 .status { display: inline-flex; align-items: center; gap: 8px; color: #516056; font-size: 13px; font-weight: 700; letter-spacing: .08em; }
 .status span { width: 8px; height: 8px; border-radius: 50%; background: #e89954; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 18px; margin-top: 18px; }

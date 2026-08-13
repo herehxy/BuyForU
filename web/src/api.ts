@@ -99,8 +99,19 @@ export function decide(run: AgentRun, decision: 'APPROVE' | 'REJECT'): Promise<C
   })
 }
 
-// 使用 fetch 流而非 EventSource，确保 OIDC Bearer Token 只放在请求头中。
-export async function followRun(command: CommandAccepted, onProgress?: (event: string) => void): Promise<AgentRun> {
+export type ProgressUpdate = { label: string; run?: AgentRun }
+
+// 命令事件只说明调度，业务进度以 run.phase 为准。
+export async function followRun(
+  command: CommandAccepted,
+  onProgress?: (update: ProgressUpdate) => void,
+): Promise<AgentRun> {
+  const publish = async (label: string) => {
+    const run = await getRun(command.runId).catch(() => undefined)
+    onProgress?.({ label: run ? phaseLabel(run.phase) : label, run })
+    return run
+  }
+
   let lastEventId = '0'
   for (let attempt = 0; attempt < 3; attempt++) {
     const token = await accessToken()
@@ -126,9 +137,10 @@ export async function followRun(command: CommandAccepted, onProgress?: (event: s
           const id = frame.split('\n').find((line) => line.startsWith('id:'))?.slice(3).trim()
           if (id) lastEventId = id
           const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim()
-          if (event) onProgress?.(event)
+          if (!event || event === 'heartbeat') continue
+          const run = await publish(commandEventLabel(event))
           if (event === 'command.completed' || event === 'run.waiting-user' || event === 'command.cancelled') {
-            return getRun(command.runId)
+            return run ?? getRun(command.runId)
           }
           if (event === 'command.failed') {
             const failed = await getCommand(command.commandId)
@@ -143,13 +155,17 @@ export async function followRun(command: CommandAccepted, onProgress?: (event: s
   return pollUntilTerminal(command, onProgress)
 }
 
-async function pollUntilTerminal(command: CommandAccepted, onProgress?: (event: string) => void): Promise<AgentRun> {
+async function pollUntilTerminal(
+  command: CommandAccepted,
+  onProgress?: (update: ProgressUpdate) => void,
+): Promise<AgentRun> {
   let delay = 500
   while (Date.now() < new Date(command.deadlineAt).getTime() + 5000) {
     const current = await getCommand(command.commandId)
-    onProgress?.(`command.${current.status.toLowerCase()}`)
+    const run = await getRun(command.runId).catch(() => undefined)
+    onProgress?.({ label: run ? phaseLabel(run.phase) : commandEventLabel(`command.${current.status.toLowerCase()}`), run })
     if (current.status === 'SUCCEEDED' || current.status === 'WAITING_USER' || current.status === 'CANCELLED') {
-      return getRun(command.runId)
+      return run ?? getRun(command.runId)
     }
     if (current.status === 'FAILED' || current.status === 'EXPIRED') {
       throw new Error(current.errorDetail ?? current.errorCode ?? 'Agent command failed')
@@ -158,4 +174,35 @@ async function pollUntilTerminal(command: CommandAccepted, onProgress?: (event: 
     delay = Math.min(delay * 1.5, 5000)
   }
   throw new Error('Agent command exceeded its deadline')
+}
+
+export function phaseLabel(phase: string): string {
+  return PHASE_LABELS[phase] ?? phase
+}
+
+const PHASE_LABELS: Record<string, string> = {
+  NEW: '已接收需求',
+  NEEDS_CLARIFICATION: '需要你补充信息',
+  SEARCHING: '正在搜索商品',
+  PRESENTING_CANDIDATES: '请选择商品',
+  PREPARING_CONFIRMABLE_ORDER: '正在锁定库存并报价',
+  WAITING_APPROVAL: '请确认订单和金额',
+  CREATING_ORDER: '正在创建订单',
+  NEEDS_CONSTRAINT_RELAXATION: '当前条件没有合适商品',
+  COMPLETED: '订单已创建',
+  CANCELLED: '任务已取消',
+  FAILED: '处理失败',
+}
+
+function commandEventLabel(event: string): string {
+  switch (event) {
+    case 'command.accepted': return '任务已排队，等待执行'
+    case 'command.started': return 'Agent 开始处理'
+    case 'command.retry-wait': return '下游繁忙，稍后重试'
+    case 'command.completed': return '这一步已完成'
+    case 'run.waiting-user': return '等待你操作'
+    case 'command.cancelled': return '任务已取消'
+    case 'command.failed': return '处理失败'
+    default: return '正在处理…'
+  }
 }
