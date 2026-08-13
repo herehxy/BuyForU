@@ -195,7 +195,8 @@ public final class FixedShoppingGraph {
 
     private Map<String, Object> relax(GraphState graph) {
         ShoppingAgentState state = requireActions().applyConstraintRelaxation(required(graph, "runId"),
-                required(graph, "userId"), required(graph, "relaxationMessage"));
+                required(graph, "userId"), required(graph, "relaxationMessage"),
+                graph.<String>value("relaxationFields").orElse(""));
         return stateUpdate("applyConstraintRelaxation", state, null, null);
     }
 

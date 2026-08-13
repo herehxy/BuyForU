@@ -6,8 +6,6 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
-import java.util.Locale;
-import java.util.Objects;
 import java.time.Duration;
 import com.buyforu.agent.concurrency.DependencyExecutor;
 
@@ -73,10 +71,11 @@ public final class SpringAiPlanningModel implements PlanningModel {
 
     @Override
     public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints currentConstraints,
-                                     String explicitUserInstruction) {
-        ApprovedChanges approved = ApprovedChanges.parse(explicitUserInstruction);
+                                     String explicitUserInstruction, java.util.List<String> fields) {
+        // 只认前端点名的字段。用户说“别改预算”时，不能因为句子里有“元”就把预算放开。
+        ApprovedChanges approved = ApprovedChanges.fromFields(fields);
         if (!approved.any()) {
-            throw new IllegalArgumentException("constraint relaxation instruction does not name a supported field");
+            throw new IllegalArgumentException("constraint relaxation must name at least one supported field");
         }
         PlanSpec proposed = plan(request + "\nExplicitly approved constraint change: " + explicitUserInstruction,
                 null, "user explicitly requested constraint relaxation", 0);
@@ -180,26 +179,29 @@ public final class SpringAiPlanningModel implements PlanningModel {
 
     private record ApprovedChanges(boolean query, boolean category, boolean budget, boolean brand,
                                    boolean attributes, boolean quantity, boolean delivery) {
-        static ApprovedChanges parse(String instruction) {
-            Objects.requireNonNull(instruction, "explicitUserInstruction");
-            String text = instruction.toLowerCase(Locale.ROOT);
+        static ApprovedChanges fromFields(java.util.List<String> fields) {
+            java.util.Set<String> named = new java.util.LinkedHashSet<>();
+            if (fields != null) {
+                for (String field : fields) {
+                    if (field == null || field.isBlank()) continue;
+                    if ("addressId".equals(field)) {
+                        throw new IllegalArgumentException("constraint relaxation cannot change addressId");
+                    }
+                    named.add(field);
+                }
+            }
             return new ApprovedChanges(
-                    containsAny(text, "搜索词", "关键词", "query", "产品类型", "商品类型"),
-                    containsAny(text, "品类", "类别", "category"),
-                    containsAny(text, "预算", "价格", "元", "budget", "price"),
-                    containsAny(text, "品牌", "brand"),
-                    containsAny(text, "配置", "规格", "内存", "硬盘", "重量", "attribute", "memory", "storage"),
-                    containsAny(text, "数量", "几件", "quantity"),
-                    containsAny(text, "送达", "到货", "配送", "日期", "delivery"));
+                    named.contains("query"),
+                    named.contains("category"),
+                    named.contains("budgetMax"),
+                    named.contains("preferredBrands") || named.contains("excludedBrands"),
+                    named.contains("requiredAttributes"),
+                    named.contains("quantity"),
+                    named.contains("deliveryBy"));
         }
 
         boolean any() {
             return query || category || budget || brand || attributes || quantity || delivery;
-        }
-
-        private static boolean containsAny(String text, String... needles) {
-            for (String needle : needles) if (text.contains(needle)) return true;
-            return false;
         }
     }
 }

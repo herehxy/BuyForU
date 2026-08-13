@@ -120,10 +120,12 @@ public class GraphShoppingWorkflow {
         return actions.get(runId, userId);
     }
 
-    public ShoppingAgentState relax(String runId, String userId, String explicitInstruction) {
+    public ShoppingAgentState relax(String runId, String userId, String explicitInstruction,
+                                    java.util.List<String> fields) {
         assertOwner(runId, userId);
         resume(runId, "constraintRelaxation",
-                Map.of("relaxationRoute", "approved", "relaxationMessage", explicitInstruction));
+                Map.of("relaxationRoute", "approved", "relaxationMessage", explicitInstruction,
+                        "relaxationFields", fields == null ? "" : String.join(",", fields)));
         return actions.get(runId, userId);
     }
 

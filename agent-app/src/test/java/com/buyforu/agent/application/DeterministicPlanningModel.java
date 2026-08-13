@@ -17,7 +17,8 @@ public final class DeterministicPlanningModel implements PlanningModel {
     }
 
     @Override
-    public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints, String instruction) {
+    public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints, String instruction,
+                                      java.util.List<String> fields) {
         PlanSpec base = createPlan(request, constraints);
         var c = base.normalizedConstraints();
         return new PlanSpec(base.intentType(), new PlanSpec.ShoppingConstraints(c.query(), c.category(), null,

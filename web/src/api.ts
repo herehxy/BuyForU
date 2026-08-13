@@ -65,8 +65,8 @@ export function clarify(runId: string, message: string): Promise<CommandAccepted
   return command(`/api/v1/runs/${runId}/clarifications`, { message })
 }
 
-export function relaxConstraints(runId: string, message: string): Promise<CommandAccepted> {
-  return command(`/api/v1/runs/${runId}/constraint-relaxations`, { message })
+export function relaxConstraints(runId: string, message: string, fields: string[]): Promise<CommandAccepted> {
+  return command(`/api/v1/runs/${runId}/constraint-relaxations`, { message, fields })
 }
 
 export function cancelRun(runId: string): Promise<CommandAccepted> {

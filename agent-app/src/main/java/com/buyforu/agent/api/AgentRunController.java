@@ -61,7 +61,7 @@ public class AgentRunController {
                 .getBytes(StandardCharsets.UTF_8)).toString();
         return commands.accept(runId, userId, http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.START,
                 AgentCommand.QueueClass.PLANNING,
-                new CommandPayload(request.conversationId(), request.message(), null, null, null, secured));
+                new CommandPayload(request.conversationId(), request.message(), null, null, null, secured, null));
     }
 
     @GetMapping("/runs/{runId}")
@@ -81,7 +81,7 @@ public class AgentRunController {
                               @RequestHeader("Idempotency-Key") String idempotencyKey,
                               @Valid @RequestBody SelectionRequest request) {
         return commands.accept(runId, AuthenticatedUser.id(jwt), http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.SELECT,
-                AgentCommand.QueueClass.TRANSACTION, new CommandPayload(null, null, request.skuId(), null, null, null));
+                AgentCommand.QueueClass.TRANSACTION, new CommandPayload(null, null, request.skuId(), null, null, null, null));
     }
 
     @PostMapping("/runs/{runId}/clarifications")
@@ -91,7 +91,7 @@ public class AgentRunController {
                                @RequestHeader("Idempotency-Key") String idempotencyKey,
                                @Valid @RequestBody ClarificationRequest request) {
         return commands.accept(runId, AuthenticatedUser.id(jwt), http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.CLARIFY,
-                AgentCommand.QueueClass.PLANNING, new CommandPayload(null, request.message(), null, null, null, null));
+                AgentCommand.QueueClass.PLANNING, new CommandPayload(null, request.message(), null, null, null, null, null));
     }
 
     @PostMapping("/runs/{runId}/approvals")
@@ -103,7 +103,7 @@ public class AgentRunController {
         String userId = AuthenticatedUser.id(jwt);
         if (request.decision() == Decision.REJECT) return commands.accept(runId, userId, http.getRemoteAddr(), idempotencyKey,
                 AgentCommand.CommandType.REJECT, AgentCommand.QueueClass.CONTROL,
-                new CommandPayload(null, null, null, null, null, null));
+                new CommandPayload(null, null, null, null, null, null, null));
         if (request.decision() == null) throw new IllegalArgumentException("decision is required");
         if (request.snapshotId() == null || request.snapshotId().isBlank()
                 || request.expectedSummaryHash() == null || request.expectedSummaryHash().isBlank()) {
@@ -111,7 +111,7 @@ public class AgentRunController {
         }
         return commands.accept(runId, userId, http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.APPROVE,
                 AgentCommand.QueueClass.TRANSACTION, new CommandPayload(null, null, null, request.snapshotId(),
-                        request.expectedSummaryHash(), null));
+                        request.expectedSummaryHash(), null, null));
     }
 
     @PostMapping("/runs/{runId}/constraint-relaxations")
@@ -120,8 +120,12 @@ public class AgentRunController {
                              HttpServletRequest http,
                              @RequestHeader("Idempotency-Key") String idempotencyKey,
                              @Valid @RequestBody ConstraintRelaxationRequest request) {
+        if (request.fields() == null || request.fields().isEmpty()) {
+            throw new IllegalArgumentException("constraint relaxation must name at least one field");
+        }
         return commands.accept(runId, AuthenticatedUser.id(jwt), http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.RELAX,
-                AgentCommand.QueueClass.PLANNING, new CommandPayload(null, request.message(), null, null, null, null));
+                AgentCommand.QueueClass.PLANNING, new CommandPayload(null, request.message(), null, null, null, null,
+                        request.fields()));
     }
 
     @PostMapping("/runs/{runId}/cancellations")
@@ -130,7 +134,7 @@ public class AgentRunController {
                            HttpServletRequest http,
                            @RequestHeader("Idempotency-Key") String idempotencyKey) {
         return commands.accept(runId, AuthenticatedUser.id(jwt), http.getRemoteAddr(), idempotencyKey, AgentCommand.CommandType.CANCEL,
-                AgentCommand.QueueClass.CONTROL, new CommandPayload(null, null, null, null, null, null));
+                AgentCommand.QueueClass.CONTROL, new CommandPayload(null, null, null, null, null, null, null));
     }
 
     public record StartRunRequest(@NotBlank @Size(max = 128) String conversationId,
@@ -145,7 +149,8 @@ public class AgentRunController {
     public record ClarificationRequest(@NotBlank @Size(max = 4000) String message) {
     }
 
-    public record ConstraintRelaxationRequest(@NotBlank @Size(max = 4000) String message) {
+    public record ConstraintRelaxationRequest(@NotBlank @Size(max = 4000) String message,
+                                              java.util.List<@NotBlank @Size(max = 64) String> fields) {
     }
 
     public record ApprovalRequest(Decision decision, String snapshotId, String expectedSummaryHash) {
