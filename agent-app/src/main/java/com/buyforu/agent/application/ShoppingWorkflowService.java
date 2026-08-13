@@ -133,14 +133,14 @@ public class ShoppingWorkflowService {
         return executeSearch(get(runId, userId));
     }
 
-    ShoppingAgentState applyConstraintRelaxation(String runId, String userId, String instruction) {
+    ShoppingAgentState applyConstraintRelaxation(String runId, String userId, String instruction, String fieldsCsv) {
         ShoppingAgentState state = get(runId, userId);
         if (state.phase() != Phase.NEEDS_CONSTRAINT_RELAXATION) {
             throw new RunStateConflictException("run is not waiting for constraint relaxation");
         }
         memory.appendUserMessage(state.conversationId(), userId, instruction);
         PlanSpec relaxed = planValidator.validate(planningModel.relaxConstraints(state.originalRequest(),
-                state.planSpec().normalizedConstraints(), instruction));
+                state.planSpec().normalizedConstraints(), instruction, parseFields(fieldsCsv)));
         if (relaxed.normalizedConstraints().version() != state.planSpec().normalizedConstraints().version() + 1) {
             throw new IllegalStateException("constraint relaxation must increment exactly one version");
         }
@@ -435,6 +435,14 @@ public class ShoppingWorkflowService {
         StringBuilder result = new StringBuilder("User conversation in chronological order:\n");
         for (String message : messages) result.append("- ").append(message).append('\n');
         return result.toString();
+    }
+
+    private static java.util.List<String> parseFields(String fieldsCsv) {
+        if (fieldsCsv == null || fieldsCsv.isBlank()) return java.util.List.of();
+        return java.util.Arrays.stream(fieldsCsv.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .toList();
     }
 
     private static void assertOwner(ShoppingAgentState state, String userId) {

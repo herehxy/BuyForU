@@ -135,8 +135,8 @@ class ShoppingWorkflowServiceTest {
 
             @Override
             public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints,
-                                              String instruction) {
-                return delegate.relaxConstraints(request, constraints, instruction);
+                                              String instruction, List<String> fields) {
+                return delegate.relaxConstraints(request, constraints, instruction, fields);
             }
         };
         ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),

@@ -115,6 +115,50 @@ export function App() {
   )
 }
 
+const RELAX_FIELDS = [
+  { id: 'budgetMax', label: '预算' },
+  { id: 'preferredBrands', label: '品牌' },
+  { id: 'requiredAttributes', label: '规格' },
+  { id: 'deliveryBy', label: '送达时间' },
+  { id: 'quantity', label: '数量' },
+  { id: 'query', label: '搜索词' },
+] as const
+
+function RelaxForm({ runId, busy, act }: {
+  runId: string
+  busy: boolean
+  act: (action: () => Promise<CommandAccepted>) => void
+}) {
+  const [relaxation, setRelaxation] = useState('')
+  const [fields, setFields] = useState<string[]>([])
+  const toggle = (id: string) => setFields((current) =>
+    current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+  return (
+    <form className="clarification" onSubmit={(event) => {
+      event.preventDefault()
+      if (relaxation.trim() && fields.length > 0) {
+        act(() => relaxConstraints(runId, relaxation.trim(), fields))
+      }
+    }}>
+      <h2>当前硬性条件下没有合适商品</h2>
+      <p>先勾选允许改的条件，再写具体要求。没勾选的字段不会动。</p>
+      <div className="address-row">
+        {RELAX_FIELDS.map((field) => (
+          <label key={field.id}>
+            <input type="checkbox" checked={fields.includes(field.id)}
+                   onChange={() => toggle(field.id)} /> {field.label}
+          </label>
+        ))}
+      </div>
+      <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
+                onChange={(event) => setRelaxation(event.target.value)} />
+      <button disabled={busy || !relaxation.trim() || fields.length === 0}>批准这些条件变更</button>
+      <button type="button" className="secondary" disabled={busy}
+              onClick={() => act(() => cancelRun(runId))}>不放宽，取消任务</button>
+    </form>
+  )
+}
+
 function RunView({ run, busy, act }: {
   run: AgentRun
   busy: boolean
@@ -122,7 +166,6 @@ function RunView({ run, busy, act }: {
 }) {
   // UI 严格按照后端 phase 显示允许的动作，不能由前端跳过选品或快照确认。
   const [clarification, setClarification] = useState('')
-  const [relaxation, setRelaxation] = useState('')
   return (
     <section className="run">
       <div className="status"><span />{run.phase}</div>
@@ -166,18 +209,7 @@ function RunView({ run, busy, act }: {
       )}
 
       {run.phase === 'NEEDS_CONSTRAINT_RELAXATION' && (
-        <form className="clarification" onSubmit={(event) => {
-          event.preventDefault()
-          if (relaxation.trim()) act(() => relaxConstraints(run.runId, relaxation.trim()))
-        }}>
-          <h2>当前硬性条件下没有合适商品</h2>
-          <p>只有你明确说明允许修改哪些条件后，Agent 才会重新搜索。</p>
-          <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
-                    onChange={(event) => setRelaxation(event.target.value)} />
-          <button disabled={busy || !relaxation.trim()}>批准这些条件变更</button>
-          <button type="button" className="secondary" disabled={busy}
-                  onClick={() => act(() => cancelRun(run.runId))}>不放宽，取消任务</button>
-        </form>
+        <RelaxForm runId={run.runId} busy={busy} act={act} />
       )}
 
       {run.phase === 'WAITING_APPROVAL' && run.confirmableSnapshot && (

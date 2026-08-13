@@ -205,7 +205,7 @@ public class JdbcCommerceEngine implements CommerceGateway {
         ConfirmableOrderSnapshot replay = beginEffect(effect, "PREPARE_CONFIRMABLE_ORDER", requestHash,
                 ConfirmableOrderSnapshot.class);
         if (replay != null) return replay;
-        expireReservationsLocked();
+        expireReservationsForSku(request.skuId());
         // FOR UPDATE 串行化同一 SKU 的并发预占；检查与扣减处于同一事务，避免先查后扣导致超卖。
         Integer stock = jdbc.query("""
                 SELECT available_quantity FROM commerce_schema.inventory WHERE sku_id = ? FOR UPDATE
@@ -293,14 +293,13 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 approval == null ? "" : approval.approvalId(), approval == null ? "" : approval.expectedSummaryHash());
         Order replay = beginEffect(effect, "CREATE_ORDER", requestHash, Order.class);
         if (replay != null) return replay;
-        expireReservationsLocked();
-
         ConfirmableOrderSnapshot snapshot = jdbc.query("""
                 SELECT snapshot::text FROM commerce_schema.confirmable_snapshot
                 WHERE snapshot_id = ? FOR UPDATE
                 """, (result, row) -> json.readValue(result.getString(1), ConfirmableOrderSnapshot.class),
                 command.snapshotId()).stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SNAPSHOT_NOT_FOUND", "snapshot not found"));
+        expireReservationsForSku(snapshot.reservation().skuId());
         validateApprovalIdentity(command, snapshot);
         // 即使客户端换了新的网络幂等键，只要来源快照相同，也只能存在一个订单。
         Order existingOrder = jdbc.query("""
@@ -398,26 +397,42 @@ public class JdbcCommerceEngine implements CommerceGateway {
 
     @Transactional
     public int expireReservationsNow() {
-        return expireReservationsLocked();
+        return expireReservationsBatch(100);
     }
 
-    private int expireReservationsLocked() {
-        // 先锁住所有到期 ACTIVE 记录并归还库存，最后统一标记 EXPIRED；整个过程是一个事务。
-        List<ReservationRow> expired = jdbc.query("""
-                SELECT sku_id, quantity, status FROM commerce_schema.inventory_reservation
-                WHERE status = 'ACTIVE' AND expires_at <= ? FOR UPDATE
-                """, (result, row) -> new ReservationRow(result.getString(1), result.getInt(2), result.getString(3)),
-                Timestamp.from(clock.instant()));
-        for (ReservationRow row : expired) {
+    /** 下单热路径只回收当前 SKU，避免锁住全表过期预占。 */
+    private int expireReservationsForSku(String skuId) {
+        return expireReservations("""
+                SELECT reservation_id, sku_id, quantity FROM commerce_schema.inventory_reservation
+                WHERE sku_id = ? AND status = 'ACTIVE' AND expires_at <= ? FOR UPDATE
+                """, skuId, Timestamp.from(clock.instant()));
+    }
+
+    /** 后台作业：SKIP LOCKED 分批回收，多个实例不会抢同一行。 */
+    private int expireReservationsBatch(int limit) {
+        return expireReservations("""
+                SELECT reservation_id, sku_id, quantity FROM commerce_schema.inventory_reservation
+                WHERE status = 'ACTIVE' AND expires_at <= ?
+                ORDER BY sku_id, reservation_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT """ + limit, Timestamp.from(clock.instant()));
+    }
+
+    private int expireReservations(String sql, Object... args) {
+        List<ExpiredReservation> expired = jdbc.query(sql,
+                (result, row) -> new ExpiredReservation(result.getString(1), result.getString(2), result.getInt(3)),
+                args);
+        for (ExpiredReservation row : expired) {
             jdbc.update("""
                     UPDATE commerce_schema.inventory SET available_quantity = available_quantity + ?, version = version + 1
                     WHERE sku_id = ?
                     """, row.quantity(), row.skuId());
+            jdbc.update("""
+                    UPDATE commerce_schema.inventory_reservation SET status = 'EXPIRED'
+                    WHERE reservation_id = ? AND status = 'ACTIVE'
+                    """, row.reservationId());
         }
-        return jdbc.update("""
-                UPDATE commerce_schema.inventory_reservation SET status = 'EXPIRED'
-                WHERE status = 'ACTIVE' AND expires_at <= ?
-                """, Timestamp.from(clock.instant()));
+        return expired.size();
     }
 
     private long nextVersion(String sequence) {
@@ -477,6 +492,7 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     private record ReservationRow(String skuId, int quantity, String status) { }
+    private record ExpiredReservation(String reservationId, String skuId, int quantity) { }
     private record EffectRow(String operation, String requestHash, String status, String result) { }
     private record AddressRow(String userId, int deliveryDays) { }
     private record PromotionRow(String code, String description, BigDecimal discountAmount) { }
