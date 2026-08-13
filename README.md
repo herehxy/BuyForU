@@ -123,6 +123,17 @@ npm run dev
 cd web && npm run build
 ```
 
+一键验收（单测；有 Docker 再跑集成测试；然后前端 typecheck/build）：
+
+```bash
+chmod +x scripts/accept.sh
+./scripts/accept.sh
+```
+
+集成测试单独跑：`./mvnw -Pintegration verify`。默认 `./mvnw test` 不起容器。
+
+压测脚本在 `scripts/k6/`，需要本机已起服务并准备好 JWT，不进 CI 必过路径。
+
 测试覆盖固定图真实节点与两次人工恢复、完整选择/预占/审批/下单、订单副作用后的崩溃恢复、库存并发不超卖、effect 冲突、用户隔离、结构化计划安全校验和 pgvector chunk 边界。完整外部验收还要求 Docker 服务正常且 DeepSeek Key 可调用。
 
 本地采用 PostgreSQL 而不是 MySQL，是因为本项目同时依赖关系事务、行锁、advisory lock、JSONB 和 pgvector；将交易状态、LangGraph checkpoint 与向量知识放在同一个可事务运维的数据平台，能减少当前规模下不必要的中间件。若未来交易主库必须接入既有 MySQL，`CommerceGateway` 边界允许替换 Commerce 持久化，而 Agent 的 pgvector/checkpoint 仍可独立保留在 PostgreSQL。
