@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listRuns, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
 import type { DeliveryAddress } from './api'
 import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
@@ -28,8 +28,11 @@ export function App() {
   const mutation = useMutation({
     mutationFn: async (action: () => Promise<CommandAccepted>) => {
       const accepted = await action()
-      setProgress(`命令已进入 ${accepted.queueClass} 公平队列`)
-      return followRun(accepted, setProgress)
+      setProgress('任务已排队，等待执行')
+      return followRun(accepted, (update) => {
+        setProgress(update.label)
+        if (update.run) setRun(update.run)
+      })
     },
     onSuccess: setRun,
   })
@@ -60,9 +63,13 @@ export function App() {
         })
         .catch(() => userManager!.getUser()
           .then((authenticated) => setUser(authenticated?.expired ? null : authenticated)))
-    } else {
-      userManager.getUser().then((authenticated) => setUser(authenticated?.expired ? null : authenticated))
+      return
     }
+    // 退出后 Keycloak 回到站点根路径，清掉回调参数再读本地会话。
+    userManager.signoutRedirectCallback().catch(() => undefined).finally(() => {
+      window.history.replaceState({}, '', '/')
+      userManager!.getUser().then((authenticated) => setUser(authenticated?.expired ? null : authenticated))
+    })
   }, [])
 
   if (authConfigurationError) return <main className="shell"><div className="error">{authConfigurationError}</div></main>
@@ -101,18 +108,51 @@ export function App() {
 
       {addressMutation.error && <div className="error">{addressMutation.error.message}</div>}
       {mutation.error && <div className="error">{mutation.error.message}</div>}
-      {mutation.isPending && progress && <div className="status"><span />{progress}</div>}
+      {(mutation.isPending || run) && (
+        <AgentProgress phase={run?.phase} hint={mutation.isPending ? progress : undefined} />
+      )}
       {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
       {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
       {!run && recentRuns.length > 0 && <section className="history">
         <h2>最近任务</h2>
         {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
           onClick={() => getRun(item.runId).then(setRun).catch(() => setRun(item))}>
-          <span>{item.originalRequest}</span><strong>{item.phase}</strong>
+          <span>{item.originalRequest}</span><strong>{phaseLabel(item.phase)}</strong>
         </button>)}
       </section>}
     </main>
   )
+}
+
+const PIPELINE = [
+  { match: ['NEW', 'SEARCHING'], label: '理解需求并搜索' },
+  { match: ['NEEDS_CLARIFICATION'], label: '补充信息' },
+  { match: ['PRESENTING_CANDIDATES'], label: '选择商品' },
+  { match: ['PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL'], label: '确认金额' },
+  { match: ['CREATING_ORDER', 'COMPLETED'], label: '创建订单' },
+] as const
+
+function AgentProgress({ phase, hint }: { phase?: string; hint?: string }) {
+  const current = phase ?? 'NEW'
+  return (
+    <section className="progress">
+      <div className="status"><span />{hint || phaseLabel(current)}</div>
+      <ol className="steps">
+        {PIPELINE.map((step) => {
+          const phases = step.match as readonly string[]
+          const active = phases.includes(current)
+          const done = pipelineDone(current, phases[phases.length - 1])
+          return <li key={step.label} className={active ? 'active' : done ? 'done' : ''}>{step.label}</li>
+        })}
+      </ol>
+    </section>
+  )
+}
+
+function pipelineDone(phase: string, stepEnd: string): boolean {
+  const order = ['NEW', 'SEARCHING', 'NEEDS_CLARIFICATION', 'PRESENTING_CANDIDATES',
+    'PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL', 'CREATING_ORDER', 'COMPLETED']
+  return order.indexOf(phase) > order.indexOf(stepEnd)
 }
 
 const RELAX_FIELDS = [
@@ -168,7 +208,7 @@ function RunView({ run, busy, act }: {
   const [clarification, setClarification] = useState('')
   return (
     <section className="run">
-      <div className="status"><span />{run.phase}</div>
+      <p className="phase-copy">{phaseLabel(run.phase)}</p>
       {run.lastError && <p className="error">{run.lastError}</p>}
 
       {run.phase === 'NEEDS_CLARIFICATION' && (
