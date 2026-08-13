@@ -87,11 +87,12 @@ public class JdbcCommerceEngine implements CommerceGateway {
                         .noneMatch(brand -> brand.equalsIgnoreCase(candidate.brand())))
                 .filter(candidate -> request.requiredAttributes().entrySet().stream()
                         .allMatch(entry -> entry.getValue().equalsIgnoreCase(candidate.attributes().get(entry.getKey()))))
-                .filter(candidate -> request.budgetMax() == null
-                        || candidate.displayPrice().amount().compareTo(request.budgetMax().amount()) <= 0)
                 .filter(candidate -> request.deliveryBy() == null
                         || !candidate.deliveryDate().isAfter(request.deliveryBy()))
                 .filter(ProductCandidate::available)
+                // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
+                .filter(candidate -> withinBudget(candidate.displayPrice().amount(), request.quantity(),
+                        request.budgetMax()))
                 .limit(request.limit())
                 .toList();
         return new SearchResult(candidates, clock.instant());
@@ -106,7 +107,16 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, (result, row) -> result.getBigDecimal(1), request.skuId()).stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SKU_NOT_FOUND", "unknown sku: " + request.skuId()));
         Instant now = clock.instant();
-        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(request.quantity()));
+        PricedItems priced = priceItems(unitPrice, request.quantity(), now);
+        return new Quote(UUID.randomUUID().toString(), nextVersion("quote_version_seq"),
+                request.skuId(), request.quantity(),
+                new Money(priced.itemAmount(), "CNY"), priced.discounts(), new Money(priced.shipping(), "CNY"),
+                new Money(priced.payable(), "CNY"),
+                deliveryPromise, now, now.plus(QUOTE_TTL));
+    }
+
+    private PricedItems priceItems(BigDecimal unitPrice, int quantity, Instant now) {
+        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
         List<DiscountLine> discounts = new ArrayList<>();
         BigDecimal discount = BigDecimal.ZERO;
         List<PromotionRow> promotions = jdbc.query("""
@@ -131,11 +141,19 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 .orElseThrow(() -> new CommerceException("SHIPPING_RULE_MISSING", "no active shipping rule"));
         BigDecimal shipping = itemAmount.compareTo(shippingRule.freeShippingThreshold()) >= 0
                 ? BigDecimal.ZERO : shippingRule.standardFee();
-        return new Quote(UUID.randomUUID().toString(), nextVersion("quote_version_seq"),
-                request.skuId(), request.quantity(),
-                new Money(itemAmount, "CNY"), discounts, new Money(shipping, "CNY"),
-                new Money(itemAmount.subtract(discount).add(shipping), "CNY"),
-                deliveryPromise, now, now.plus(QUOTE_TTL));
+        return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
+    }
+
+    private boolean withinBudget(BigDecimal unitPrice, int quantity, Money budgetMax) {
+        if (budgetMax == null) return true;
+        return priceItems(unitPrice, quantity, clock.instant()).payable().compareTo(budgetMax.amount()) <= 0;
+    }
+
+    private static void assertWithinBudget(Quote quote, Money budgetMax) {
+        if (budgetMax != null && quote.payableAmount().amount().compareTo(budgetMax.amount()) > 0) {
+            throw new CommerceException("BUDGET_EXCEEDED",
+                    "payable " + quote.payableAmount().amount() + " exceeds budget " + budgetMax.amount());
+        }
     }
 
     @Override
@@ -196,6 +214,8 @@ public class JdbcCommerceEngine implements CommerceGateway {
         if (stock < request.quantity()) throw new CommerceException("OUT_OF_STOCK", "insufficient inventory");
 
         Quote quote = quote(new QuoteRequest(request.skuId(), request.quantity(), request.userId(), request.addressId()));
+        // 搜索用的是估算应付；这里用权威报价再卡一次，超预算不扣库存。
+        assertWithinBudget(quote, request.budgetMax());
         jdbc.update("""
                 UPDATE commerce_schema.inventory
                 SET available_quantity = available_quantity - ?, version = version + 1 WHERE sku_id = ?
@@ -461,4 +481,6 @@ public class JdbcCommerceEngine implements CommerceGateway {
     private record AddressRow(String userId, int deliveryDays) { }
     private record PromotionRow(String code, String description, BigDecimal discountAmount) { }
     private record ShippingRule(BigDecimal freeShippingThreshold, BigDecimal standardFee) { }
+    private record PricedItems(BigDecimal itemAmount, List<DiscountLine> discounts,
+                               BigDecimal shipping, BigDecimal payable) { }
 }

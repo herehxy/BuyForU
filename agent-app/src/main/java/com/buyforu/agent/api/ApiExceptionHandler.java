@@ -28,7 +28,7 @@ public class ApiExceptionHandler {
             case "SKU_NOT_FOUND", "RESERVATION_NOT_FOUND", "SNAPSHOT_NOT_FOUND",
                  "DELIVERY_ZONE_NOT_FOUND" -> HttpStatus.NOT_FOUND;
             case "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE", "SNAPSHOT_EXPIRED", "APPROVAL_EXPIRED",
-                 "EFFECT_CONFLICT", "EFFECT_IN_PROGRESS" -> HttpStatus.CONFLICT;
+                 "EFFECT_CONFLICT", "EFFECT_IN_PROGRESS", "BUDGET_EXCEEDED" -> HttpStatus.CONFLICT;
             default -> HttpStatus.UNPROCESSABLE_ENTITY;
         };
         ProblemDetail detail = ProblemDetail.forStatus(status);

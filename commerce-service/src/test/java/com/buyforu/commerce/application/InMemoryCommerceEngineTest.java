@@ -70,6 +70,33 @@ class InMemoryCommerceEngineTest {
     }
 
     @Test
+    void snapshotRejectsWhenPayableExceedsBudget() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+        CommerceException error = assertThrows(CommerceException.class, () -> engine.prepareConfirmableOrder(
+                new PrepareOrderRequest("u-1", "sku-air-16", 1, "addr-1", Money.cny("4000")),
+                effect("budget-1", "prepare-snapshot", "u-1")));
+        assertEquals("BUDGET_EXCEEDED", error.code());
+        assertEquals(8, engine.availableStock("sku-air-16"));
+    }
+
+    @Test
+    void searchUsesPayableNotListPrice() {
+        InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
+                new InMemoryCommerceEngine.CatalogItem("p", "sku-5100", "Promo laptop", "Brand", "laptop",
+                        java.util.Map.of(), new java.math.BigDecimal("5100.00"), 3),
+                new InMemoryCommerceEngine.CatalogItem("p2", "sku-4999", "List laptop", "Brand", "laptop",
+                        java.util.Map.of(), new java.math.BigDecimal("4999.00"), 3)
+        ));
+        List<ProductCandidate> underPayable = engine.searchProducts(new SearchRequest("u-1", "", "laptop",
+                Money.cny("5000"), List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
+        assertEquals(List.of("sku-4999", "sku-5100"), underPayable.stream().map(ProductCandidate::skuId).toList());
+
+        List<ProductCandidate> tight = engine.searchProducts(new SearchRequest("u-1", "", "laptop",
+                Money.cny("4000"), List.of(), java.util.Map.of(), "addr-1", null, 1, 10)).candidates();
+        assertTrue(tight.isEmpty());
+    }
+
+    @Test
     void concurrentReservationsNeverOversell() throws Exception {
         InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
                 new InMemoryCommerceEngine.CatalogItem("p", "last-sku", "Last item", "Brand", "test",

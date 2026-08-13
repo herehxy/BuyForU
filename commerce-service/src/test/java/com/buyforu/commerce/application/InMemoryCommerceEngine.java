@@ -77,7 +77,8 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 .filter(item -> request.requiredAttributes().entrySet().stream()
                         .allMatch(e -> e.getValue().equalsIgnoreCase(item.attributes().get(e.getKey()))))
                 .filter(item -> request.budgetMax() == null
-                        || item.unitPrice().compareTo(request.budgetMax().amount()) <= 0)
+                        || payable(item.unitPrice(), request.quantity())
+                        .compareTo(request.budgetMax().amount()) <= 0)
                 .sorted(Comparator.comparing(CatalogItem::unitPrice))
                 .limit(request.limit())
                 .map(item -> new ProductCandidate(item.productId(), item.skuId(), item.name(), item.brand(),
@@ -91,18 +92,10 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     public Quote quote(QuoteRequest request) {
         CatalogItem item = requireItem(request.skuId());
         Instant now = clock.instant();
-        BigDecimal itemAmount = item.unitPrice().multiply(BigDecimal.valueOf(request.quantity()));
-        List<DiscountLine> discounts = new ArrayList<>();
-        BigDecimal discount = BigDecimal.ZERO;
-        if (itemAmount.compareTo(new BigDecimal("5000")) >= 0) {
-            discount = new BigDecimal("200.00");
-            discounts.add(new DiscountLine("FULL_5000_200", "满 5000 减 200", new Money(discount, "CNY")));
-        }
-        BigDecimal shipping = itemAmount.compareTo(new BigDecimal("99")) >= 0
-                ? BigDecimal.ZERO : new BigDecimal("10.00");
+        PricedItems priced = priceItems(item.unitPrice(), request.quantity());
         return new Quote(UUID.randomUUID().toString(), quoteVersion.incrementAndGet(), request.skuId(), request.quantity(),
-                new Money(itemAmount, "CNY"), discounts, new Money(shipping, "CNY"),
-                new Money(itemAmount.subtract(discount).add(shipping), "CNY"),
+                new Money(priced.itemAmount(), "CNY"), priced.discounts(), new Money(priced.shipping(), "CNY"),
+                new Money(priced.payable(), "CNY"),
                 LocalDate.now(clock).plusDays(1), now, now.plus(QUOTE_TTL));
     }
 
@@ -120,6 +113,12 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
             expireReservations();
             requireAvailable(request.skuId(), request.quantity());
             Quote quote = quote(new QuoteRequest(request.skuId(), request.quantity(), request.userId(), request.addressId()));
+            if (request.budgetMax() != null
+                    && quote.payableAmount().amount().compareTo(request.budgetMax().amount()) > 0) {
+                throw new CommerceException("BUDGET_EXCEEDED",
+                        "payable " + quote.payableAmount().amount() + " exceeds budget "
+                                + request.budgetMax().amount());
+            }
             inventory.compute(request.skuId(), (ignored, stock) -> stock - request.quantity());
             Instant now = clock.instant();
             Reservation reservation = new Reservation(UUID.randomUUID().toString(), request.skuId(), request.quantity(),
@@ -260,6 +259,26 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     private static Instant min(Instant left, Instant right) {
         return left.isBefore(right) ? left : right;
     }
+
+    private PricedItems priceItems(BigDecimal unitPrice, int quantity) {
+        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
+        List<DiscountLine> discounts = new ArrayList<>();
+        BigDecimal discount = BigDecimal.ZERO;
+        if (itemAmount.compareTo(new BigDecimal("5000")) >= 0) {
+            discount = new BigDecimal("200.00");
+            discounts.add(new DiscountLine("FULL_5000_200", "满 5000 减 200", new Money(discount, "CNY")));
+        }
+        BigDecimal shipping = itemAmount.compareTo(new BigDecimal("99")) >= 0
+                ? BigDecimal.ZERO : new BigDecimal("10.00");
+        return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
+    }
+
+    private BigDecimal payable(BigDecimal unitPrice, int quantity) {
+        return priceItems(unitPrice, quantity).payable();
+    }
+
+    private record PricedItems(BigDecimal itemAmount, List<DiscountLine> discounts,
+                               BigDecimal shipping, BigDecimal payable) { }
 
     public record CatalogItem(String productId, String skuId, String name, String brand, String category,
                               Map<String, String> attributes, BigDecimal unitPrice, int initialStock) {

@@ -351,7 +351,8 @@ public class ShoppingWorkflowService {
         try {
             EffectContext effect = effectContext(state, effectId, "prepare-snapshot", logicalAttempt);
             ConfirmableOrderSnapshot snapshot = commerce.prepareConfirmableOrder(
-                    new PrepareOrderRequest(state.userId(), candidate.skuId(), c.quantity(), c.addressId()), effect);
+                    new PrepareOrderRequest(state.userId(), candidate.skuId(), c.quantity(), c.addressId(),
+                            c.budgetMax()), effect);
             PendingApproval approval = new PendingApproval(UUID.randomUUID().toString(), snapshot.snapshotId(),
                     snapshot.summaryHash(), snapshot.expiresAt());
             ActiveEffect applied = new ActiveEffect(effectId, "PREPARE_CONFIRMABLE_ORDER", requestHash,
@@ -360,20 +361,28 @@ public class ShoppingWorkflowService {
                     approval, applied, state.candidateFallbackCount(), state.searchReplanCount(),
                     state.planVersion(), null, null));
         } catch (CommerceOperationException failure) {
-            if (!List.of("OUT_OF_STOCK", "SKU_NOT_FOUND").contains(failure.code())) throw failure;
-            return fallbackAfterPrepareFailure(state, failure.getMessage());
+            boolean stockGone = List.of("OUT_OF_STOCK", "SKU_NOT_FOUND").contains(failure.code());
+            boolean overBudget = "BUDGET_EXCEEDED".equals(failure.code());
+            if (!stockGone && !overBudget) throw failure;
+            // 超预算不能靠“换搜索词”偷偷抬预算，只换下一个候选或请用户明确放宽。
+            return fallbackAfterPrepareFailure(state, failure.getMessage(), !overBudget);
         }
     }
 
-    private ShoppingAgentState fallbackAfterPrepareFailure(ShoppingAgentState state, String reason) {
+    private ShoppingAgentState fallbackAfterPrepareFailure(ShoppingAgentState state, String reason,
+                                                          boolean allowSearchReplan) {
         // 只有缺货/下架才进入三级回退；权限、地址或协议错误必须直接暴露，不能被“换商品”掩盖。
         ReplanController.ReplanDecision decision = replanController.decide(state);
         return switch (decision.level()) {
             case CANDIDATE_FALLBACK -> prepareSnapshot(copy(state, Phase.PREPARING_CONFIRMABLE_ORDER,
                     decision.candidateIndex(), null, null, null, state.candidateFallbackCount() + 1,
                     state.searchReplanCount(), state.planVersion(), reason, null));
-            case SEARCH_REPLAN -> replanAndSearch(state,
-                    "catalog candidates became unavailable while reserving inventory: " + reason);
+            case SEARCH_REPLAN -> allowSearchReplan
+                    ? replanAndSearch(state,
+                    "catalog candidates became unavailable while reserving inventory: " + reason)
+                    : store.save(copy(state, Phase.NEEDS_CONSTRAINT_RELAXATION, -1,
+                    null, null, null, state.candidateFallbackCount(), state.searchReplanCount(),
+                    state.planVersion(), reason, null));
             case CONSTRAINT_RELAXATION -> store.save(copy(state, Phase.NEEDS_CONSTRAINT_RELAXATION, -1,
                     null, null, null, state.candidateFallbackCount(), state.searchReplanCount(),
                     state.planVersion(), reason, null));

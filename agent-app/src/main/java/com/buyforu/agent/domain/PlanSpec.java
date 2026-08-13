@@ -53,7 +53,10 @@ public record PlanSpec(
         }
     }
 
-    /** 用户明确表达并经应用合并后的硬约束；version 用于追踪每次受控变更。 */
+    /**
+     * 用户明确表达并经应用合并后的硬约束；version 用于追踪每次受控变更。
+     * budgetMax 是应付合计上限（小计 − 优惠 + 运费），不是吊牌单价上限。
+     */
     public record ShoppingConstraints(
             String query,
             String category,
