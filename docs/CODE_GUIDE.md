@@ -98,7 +98,8 @@ ShoppingWorkflowService.planNewRun
 - 用户批准时必须提交当前 `snapshotId + summaryHash`。
 - `createOrder` 再次验证用户、快照、审批时间和预占状态。
 - 所有副作用先登记 `effectId/idempotencyKey`，成功结果可安全重放。
-- 订单与 Outbox 事件在同一数据库事务提交。Outbox 投递先短事务认领，HTTP 在事务外发送。
+- 订单与 Outbox 事件在同一数据库事务提交。Outbox 投递先短事务认领，HTTP 在事务外发送；至少投递一次，接收方按 `eventId` 去重。
+- 写命令的幂等键在同一个用户的同一个 run 内唯一，失败后换新 key 再试。
 - 非 START 命令先验 run 主人再落库；SSE 只认 `agent_run` 或 START 命令的用户。
 - 约束放宽必须由用户点名字段，不能靠句子里的“元”“预算”推断。
 

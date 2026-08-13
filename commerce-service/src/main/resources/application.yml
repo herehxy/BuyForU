@@ -37,6 +37,8 @@ buyforu:
     # production profile 必须配置真实 Webhook 和 HMAC 签名密钥。
     webhook-url: ${EVENT_WEBHOOK_URL:}
     signing-secret: ${EVENT_SIGNING_SECRET:}
+    # 留空则启动时生成随机 UUID，保证多实例 claimed_by 不会撞车。
+    instance-id: ${EVENT_INSTANCE_ID:}
 management:
   # 只暴露健康、构建信息和 Prometheus 指标。
   endpoint:

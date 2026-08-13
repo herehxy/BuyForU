@@ -10,6 +10,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 先短事务把事件标成 CLAIMED，提交后再发 HTTP。
@@ -24,11 +25,13 @@ public class OutboxDispatcher {
     private final String instanceId;
 
     public OutboxDispatcher(JdbcTemplate jdbc, TransactionTemplate transactions, DomainEventPublisher publisher,
-                            @Value("${buyforu.events.instance-id:${spring.application.name}-local}") String instanceId) {
+                            @Value("${buyforu.events.instance-id:}") String configuredInstanceId) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.publisher = publisher;
-        this.instanceId = instanceId;
+        // 未配置时每次启动一个随机 ID，避免多实例都写成 buyforu-commerce-local。
+        this.instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? UUID.randomUUID().toString() : configuredInstanceId;
     }
 
     @Scheduled(fixedDelayString = "${buyforu.outbox.poll-delay:PT1S}", scheduler = "outboxScheduler")
@@ -81,8 +84,8 @@ public class OutboxDispatcher {
                 UPDATE commerce_schema.outbox_event
                 SET status = 'PUBLISHED', published_at = now(), last_error = NULL,
                     claimed_at = NULL, claimed_by = NULL
-                WHERE event_id = ? AND status = 'CLAIMED'
-                """, eventId);
+                WHERE event_id = ? AND status = 'CLAIMED' AND claimed_by = ?
+                """, eventId, instanceId);
     }
 
     private void markRetry(OutboxRow row, RuntimeException failure) {
@@ -96,9 +99,9 @@ public class OutboxDispatcher {
                     last_error = ?,
                     claimed_at = NULL,
                     claimed_by = NULL
-                WHERE event_id = ? AND status = 'CLAIMED'
+                WHERE event_id = ? AND status = 'CLAIMED' AND claimed_by = ?
                 """, attempts, attempts, MAX_ATTEMPTS, retryAfter.toSeconds(),
-                truncate(failure.getMessage()), row.event().eventId());
+                truncate(failure.getMessage()), row.event().eventId(), instanceId);
     }
 
     private static String truncate(String value) {

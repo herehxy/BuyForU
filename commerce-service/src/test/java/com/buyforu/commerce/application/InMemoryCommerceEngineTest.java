@@ -45,6 +45,18 @@ class InMemoryCommerceEngineTest {
     }
 
     @Test
+    void rejectsEffectIdReuseWhenOnlyBudgetChanges() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+        EffectContext effect = effect("same-effect-budget", "prepare-snapshot", "u-1");
+        engine.prepareConfirmableOrder(new PrepareOrderRequest("u-1", "sku-air-16", 1, "addr-1", Money.cny("5000")),
+                effect);
+        CommerceException error = assertThrows(CommerceException.class, () ->
+                engine.prepareConfirmableOrder(new PrepareOrderRequest("u-1", "sku-air-16", 1, "addr-1", Money.cny("4000")),
+                        effect));
+        assertEquals("EFFECT_CONFLICT", error.code());
+    }
+
+    @Test
     void rejectsEffectIdReuseWithDifferentRequest() {
         InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
         EffectContext effect = effect("same-effect", "prepare-snapshot", "u-1");

@@ -108,7 +108,7 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     public synchronized ConfirmableOrderSnapshot prepareConfirmableOrder(
             PrepareOrderRequest request, EffectContext effectContext) {
         String requestHash = hash("prepare", request.userId(), request.skuId(), String.valueOf(request.quantity()),
-                request.addressId());
+                request.addressId(), budgetKey(request.budgetMax()));
         return effectLedger.execute(effectContext, "PREPARE_CONFIRMABLE_ORDER", requestHash, () -> {
             expireReservations();
             requireAvailable(request.skuId(), request.quantity());
@@ -245,6 +245,10 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
         return hash(snapshotId, request.userId(), request.addressId(), request.skuId(),
                 String.valueOf(request.quantity()), quote.payableAmount().amount().toPlainString(),
                 quote.deliveryPromise().toString(), reservation.reservationId(), expiresAt.toString());
+    }
+
+    private static String budgetKey(Money budgetMax) {
+        return budgetMax == null ? "" : budgetMax.amount().toPlainString() + "\u001f" + budgetMax.currency();
     }
 
     private static String hash(String... values) {
