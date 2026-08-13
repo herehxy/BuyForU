@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -34,8 +35,9 @@ public final class DependencyExecutor {
     private final ExecutorService embedding = executor("embedding-");
     private final Map<Dependency, Bulkhead> bulkheads;
     private final Map<Dependency, CircuitBreaker> breakers;
+    private final InFlightCallRegistry inFlight;
 
-    public DependencyExecutor(ConcurrencyProperties properties, MeterRegistry meters) {
+    public DependencyExecutor(ConcurrencyProperties properties, MeterRegistry meters, InFlightCallRegistry inFlight) {
         bulkheads = Map.of(
                 Dependency.DEEPSEEK, bulkhead("deepseek-planning", properties.deepseekConcurrency()),
                 Dependency.MCP_READ, bulkhead("commerce-mcp-read", properties.mcpReadConcurrency()),
@@ -53,6 +55,7 @@ public final class DependencyExecutor {
                 java.util.List.of(io.micrometer.core.instrument.Tag.of("name", bulkhead.getName())), bulkhead,
                 value -> value.getMetrics().getMaxAllowedConcurrentCalls()
                         - value.getMetrics().getAvailableConcurrentCalls()));
+        this.inFlight = inFlight;
     }
 
     public <T> T call(Dependency dependency, Duration timeout, int attempts, Callable<T> action) {
@@ -66,12 +69,16 @@ public final class DependencyExecutor {
                 Callable<T> protectedCall = Bulkhead.decorateCallable(bulkheads.get(dependency),
                         CircuitBreaker.decorateCallable(breakers.get(dependency), action));
                 Future<T> future = executor(dependency).submit(protectedCall);
+                UUID commandId = ExecutionContext.current() == null ? null : ExecutionContext.current().commandId();
+                if (commandId != null) inFlight.register(commandId, future);
                 try {
                     return future.get(effective.toMillis(), TimeUnit.MILLISECONDS);
                 } catch (TimeoutException timeoutFailure) {
                     future.cancel(true);
                     breakers.get(dependency).onError(effective.toNanos(), TimeUnit.NANOSECONDS, timeoutFailure);
                     throw new DependencyTimeoutException(dependency, timeoutFailure);
+                } finally {
+                    if (commandId != null) inFlight.clear(commandId, future);
                 }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();

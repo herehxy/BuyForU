@@ -40,7 +40,7 @@ public class CommandService {
         if (type != CommandType.START) assertRunOwner(runId, userId);
         String body = json.writeValueAsString(payload);
         String requestHash = sha256(type.name() + "\u001f" + runId + "\u001f" + body);
-        var existing = commands.findByIdempotency(userId, idempotencyKey);
+        var existing = commands.findByIdempotency(userId, runId, idempotencyKey);
         if (existing.isPresent()) return replay(existing.get(), runId, requestHash);
 
         admission.admit(userId, remoteAddress, lane);
@@ -56,7 +56,7 @@ public class CommandService {
         try {
             commands.insert(command);
         } catch (DataIntegrityViolationException race) {
-            return replay(commands.findByIdempotency(userId, idempotencyKey).orElseThrow(() -> race), runId, requestHash);
+            return replay(commands.findByIdempotency(userId, runId, idempotencyKey).orElseThrow(() -> race), runId, requestHash);
         }
         try {
             if (lane == QueueClass.CONTROL) {
@@ -87,6 +87,11 @@ public class CommandService {
         // 同一把幂等键不能拿来操作另一个 run，也不能改请求内容后重放。
         if (!existing.runId().equals(runId) || !existing.requestHash().equals(hash)) {
             throw new CommandExceptions.IdempotencyConflict();
+        }
+        // 失败/过期必须换新 key 再试，避免客户端一直拿到那次失败结果。
+        if (existing.status() == CommandStatus.FAILED || existing.status() == CommandStatus.EXPIRED) {
+            throw new CommandExceptions.IdempotencyConflict(
+                    "previous command failed or expired; retry with a new Idempotency-Key");
         }
         return CommandAccepted.from(existing);
     }

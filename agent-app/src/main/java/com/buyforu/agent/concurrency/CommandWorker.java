@@ -43,30 +43,33 @@ public class CommandWorker {
     private final Semaphore controlPermits;
     private final Map<UUID, RunLeaseRepository.Lease> activeLeases = new ConcurrentHashMap<>();
     private final Map<UUID, Thread> activeThreads = new ConcurrentHashMap<>();
+    private final InFlightCallRegistry inFlight;
 
     public CommandWorker(CommandRepository commands, RunLeaseRepository leases, RedisFairQueue fairQueue,
                          GraphShoppingWorkflow workflow, RunEventRepository events,
-                         ConcurrencyProperties properties, ObjectMapper json, MeterRegistry meters) {
+                         ConcurrencyProperties properties, ObjectMapper json, MeterRegistry meters,
+                         InFlightCallRegistry inFlight) {
         this.commands = commands; this.leases = leases; this.fairQueue = fairQueue; this.workflow = workflow;
         this.events = events; this.properties = properties; this.json = json;
         this.meters = meters;
+        this.inFlight = inFlight;
         this.planningPermits = new Semaphore(properties.planningWorkers());
         this.transactionPermits = new Semaphore(properties.transactionWorkers());
         this.controlPermits = new Semaphore(properties.controlWorkers());
     }
 
-    @Scheduled(fixedDelay = 100)
+    @Scheduled(fixedDelay = 100, scheduler = "dispatchScheduler")
     void dispatch() {
         dispatchLane(AgentCommand.QueueClass.PLANNING, planningPermits, planning);
         dispatchLane(AgentCommand.QueueClass.TRANSACTION, transactionPermits, transaction);
-        if (controlPermits.tryAcquire()) {
-            var ready = commands.controlReady(1);
-            if (ready.isEmpty()) controlPermits.release();
-            else control.submit(() -> execute(ready.getFirst(), controlPermits, false));
+        // 一次取多条可执行的 CONTROL，跳过租约还被占用的 run。
+        for (AgentCommand command : commands.controlReady(properties.controlWorkers())) {
+            if (!controlPermits.tryAcquire()) break;
+            control.submit(() -> execute(command, controlPermits, false));
         }
     }
 
-    @Scheduled(fixedDelay = 5000)
+    @Scheduled(fixedDelay = 5000, scheduler = "maintenanceScheduler")
     void reconcileRedisIndex() {
         for (var lane : new AgentCommand.QueueClass[]{AgentCommand.QueueClass.PLANNING,
                 AgentCommand.QueueClass.TRANSACTION}) {
@@ -81,10 +84,11 @@ public class CommandWorker {
     }
 
     /** 续租使用独立短事务，绝不和正在进行的网络调用共享连接。 */
-    @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}")
+    @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}", scheduler = "leaseScheduler")
     void heartbeat() {
         activeLeases.forEach((commandId, lease) -> {
             if (leases.cancellationRequested(lease)) {
+                inFlight.cancel(commandId);
                 Thread worker = activeThreads.get(commandId);
                 if (worker != null) worker.interrupt();
             }
@@ -94,12 +98,12 @@ public class CommandWorker {
         });
     }
 
-    @Scheduled(fixedDelay = 3600000)
+    @Scheduled(fixedDelay = 3600000, scheduler = "maintenanceScheduler")
     void cleanEvents() {
         while (events.deleteOlderThan(Instant.now().minusSeconds(7 * 86400L), 1000) == 1000) { }
     }
 
-    @Scheduled(fixedDelay = 5000)
+    @Scheduled(fixedDelay = 5000, scheduler = "leaseScheduler")
     void recoverExpiredLeases() {
         int recovered = leases.recoverExpired();
         if (recovered > 0) meters.counter("buyforu_lease_recovered_total").increment(recovered);
@@ -191,7 +195,8 @@ public class CommandWorker {
                     payload.constraints(), command.idempotencyKey());
             case CLARIFY -> workflow.clarify(command.runId(), command.userId(), payload.message());
             case SELECT -> workflow.selectCandidate(command.runId(), command.userId(), payload.skuId());
-            case RELAX -> workflow.relax(command.runId(), command.userId(), payload.message());
+            case RELAX -> workflow.relax(command.runId(), command.userId(), payload.message(),
+                    payload.relaxationFields());
             case APPROVE -> workflow.approve(command.runId(), command.userId(), payload.snapshotId(), payload.summaryHash());
             case REJECT, CANCEL -> workflow.cancel(command.runId(), command.userId());
         };

@@ -65,8 +65,10 @@ public class RedisFairQueue {
 
     /** 分布式用户执行许可，防止同一用户的不同 run 同时占用多个昂贵下游槽位。 */
     public boolean tryAcquireUser(String userId, UUID commandId) {
+        // 许可只比租约多一个心跳，避免 release 失败后把用户堵 5 分钟。
+        Duration ttl = properties.leaseDuration().plus(properties.leaseHeartbeat());
         return Boolean.TRUE.equals(redis.opsForValue().setIfAbsent("{buyforu}:running:user:" + userId,
-                commandId.toString(), Duration.ofSeconds(300)));
+                commandId.toString(), ttl));
     }
 
     public void releaseUser(String userId, UUID commandId) {

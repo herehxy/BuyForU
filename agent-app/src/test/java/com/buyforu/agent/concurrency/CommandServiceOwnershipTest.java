@@ -62,7 +62,7 @@ class CommandServiceOwnershipTest {
     @Test
     void allowsFollowUpWhenOnlyStartCommandExists() {
         when(commands.ownsRun("run-a", "user-a")).thenReturn(true);
-        when(commands.findByIdempotency("user-a", "clarify-1")).thenReturn(Optional.empty());
+        when(commands.findByIdempotency("user-a", "run-a", "clarify-1")).thenReturn(Optional.empty());
         when(commands.insert(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         CommandAccepted accepted = service.accept("run-a", "user-a", "127.0.0.1", "clarify-1",
@@ -77,7 +77,7 @@ class CommandServiceOwnershipTest {
     @Test
     void requestsCancellationOnlyAfterOwnerIsConfirmed() {
         when(commands.ownsRun("run-a", "user-a")).thenReturn(true);
-        when(commands.findByIdempotency("user-a", "cancel-1")).thenReturn(Optional.empty());
+        when(commands.findByIdempotency("user-a", "run-a", "cancel-1")).thenReturn(Optional.empty());
         when(commands.insert(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         service.accept("run-a", "user-a", "127.0.0.1", "cancel-1",
@@ -92,7 +92,7 @@ class CommandServiceOwnershipTest {
 
     @Test
     void startDoesNotRequireAnExistingRun() {
-        when(commands.findByIdempotency("user-a", "start-1")).thenReturn(Optional.empty());
+        when(commands.findByIdempotency("user-a", "run-new", "start-1")).thenReturn(Optional.empty());
         when(commands.insert(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         service.accept("run-new", "user-a", "127.0.0.1", "start-1",
@@ -109,7 +109,7 @@ class CommandServiceOwnershipTest {
                 Instant.parse("2026-08-12T08:00:00Z"), Instant.parse("2026-08-12T08:01:00Z"),
                 null, null, null, null, Instant.parse("2026-08-12T08:00:00Z"), null, null);
         when(commands.ownsRun("run-a", "user-a")).thenReturn(true);
-        when(commands.findByIdempotency("user-a", "same-key")).thenReturn(Optional.of(existing));
+        when(commands.findByIdempotency("user-a", "run-a", "same-key")).thenReturn(Optional.of(existing));
 
         assertThrows(CommandExceptions.IdempotencyConflict.class, () -> service.accept("run-a", "user-a",
                 "127.0.0.1", "same-key", CommandType.SELECT, QueueClass.TRANSACTION, payload()));
@@ -117,6 +117,6 @@ class CommandServiceOwnershipTest {
     }
 
     private static CommandPayload payload() {
-        return new CommandPayload(null, "hello", "sku-1", null, null, null);
+        return new CommandPayload(null, "hello", "sku-1", null, null, null, null);
     }
 }
