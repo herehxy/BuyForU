@@ -35,10 +35,13 @@ public class CommandService {
     public CommandAccepted accept(String runId, String userId, String remoteAddress, String idempotencyKey, CommandType type,
                                   QueueClass lane, CommandPayload payload) {
         requireIdempotencyKey(idempotencyKey);
+        // 1) 先验主人，再 insert。否则别人对你的 runId 发一条 CANCEL，就能订 SSE、还能打断你的规划。
+        // START 例外：runId 由 userId+key 算出来，对不上别人的任务。
+        if (type != CommandType.START) assertRunOwner(runId, userId);
         String body = json.writeValueAsString(payload);
         String requestHash = sha256(type.name() + "\u001f" + runId + "\u001f" + body);
         var existing = commands.findByIdempotency(userId, idempotencyKey);
-        if (existing.isPresent()) return replay(existing.get(), requestHash);
+        if (existing.isPresent()) return replay(existing.get(), runId, requestHash);
 
         admission.admit(userId, remoteAddress, lane);
         Instant now = Instant.now();
@@ -53,7 +56,7 @@ public class CommandService {
         try {
             commands.insert(command);
         } catch (DataIntegrityViolationException race) {
-            return replay(commands.findByIdempotency(userId, idempotencyKey).orElseThrow(() -> race), requestHash);
+            return replay(commands.findByIdempotency(userId, idempotencyKey).orElseThrow(() -> race), runId, requestHash);
         }
         try {
             if (lane == QueueClass.CONTROL) {
@@ -80,8 +83,11 @@ public class CommandService {
         if (!commands.ownsRun(runId, userId)) throw new SecurityException("run belongs to another user or does not exist");
     }
 
-    private static CommandAccepted replay(AgentCommand existing, String hash) {
-        if (!existing.requestHash().equals(hash)) throw new CommandExceptions.IdempotencyConflict();
+    private static CommandAccepted replay(AgentCommand existing, String runId, String hash) {
+        // 同一把幂等键不能拿来操作另一个 run，也不能改请求内容后重放。
+        if (!existing.runId().equals(runId) || !existing.requestHash().equals(hash)) {
+            throw new CommandExceptions.IdempotencyConflict();
+        }
         return CommandAccepted.from(existing);
     }
 

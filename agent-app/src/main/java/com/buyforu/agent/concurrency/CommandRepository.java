@@ -35,11 +35,22 @@ public class CommandRepository {
                 (rs, row) -> map(rs), commandId).stream().findFirst();
     }
 
+    /**
+     * 主人只认业务 run 行，或尚未落库时的 START 命令。
+     * 不能用“该用户是否写过任意命令”，否则攻击者先插一条 CANCEL 就能订阅 SSE。
+     */
+    public Optional<String> runOwner(String runId) {
+        return jdbc.query("""
+                SELECT user_id FROM agent_schema.agent_run WHERE run_id=?
+                UNION ALL
+                SELECT user_id FROM agent_schema.agent_command
+                WHERE run_id=? AND command_type='START'
+                LIMIT 1
+                """, (rs, row) -> rs.getString(1), runId, runId).stream().findFirst();
+    }
+
     public boolean ownsRun(String runId, String userId) {
-        Integer count = jdbc.queryForObject("""
-                SELECT count(*) FROM agent_schema.agent_command WHERE run_id=? AND user_id=?
-                """, Integer.class, runId, userId);
-        return count != null && count > 0;
+        return runOwner(runId).filter(userId::equals).isPresent();
     }
 
     @Transactional
