@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listInventory, listRuns, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listInventory, listRuns, pendingCommand, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
 import type { DeliveryAddress, InventoryItem } from './api'
 import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
@@ -26,6 +26,7 @@ export function App() {
   const [restoreError, setRestoreError] = useState<string>()
   const [progress, setProgress] = useState<string>()
   const [stock, setStock] = useState<InventoryItem[]>([])
+  const restoredCommand = useRef<string | undefined>(undefined)
   const refreshStock = () => listInventory().then(setStock).catch(() => undefined)
   const mutation = useMutation({
     mutationFn: async (action: () => Promise<CommandAccepted>) => {
@@ -51,6 +52,12 @@ export function App() {
       setRecentRuns(runs)
       setStock(items)
       setRestoreError(undefined)
+      const pending = pendingCommand()
+      if (pending && restoredCommand.current !== pending.commandId) {
+        restoredCommand.current = pending.commandId
+        // 刷新页面后继续跟踪已经接纳的命令，而不是重新提交同一个业务动作。
+        mutation.mutate(() => Promise.resolve(pending))
+      }
     }).catch((failure: unknown) => {
       setRestoreError(failure instanceof Error ? failure.message : '无法恢复已有任务和配送地址。')
     })

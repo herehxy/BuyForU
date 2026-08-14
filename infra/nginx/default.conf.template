@@ -1,0 +1,21 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+
+    # API 与 SSE 同源转发；关闭代理缓冲，事件才能实时到达浏览器。
+    location /api/ {
+        proxy_pass ${AGENT_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 35m;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # React Router/OIDC callback 刷新时回退到 index.html，而不是返回 Nginx 404。
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

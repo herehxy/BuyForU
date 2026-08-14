@@ -68,6 +68,8 @@ spring:
 buyforu:
   security:
     audience: ${OIDC_AUDIENCE:buyforu-api}
+    # 逗号分隔的精确代理地址；未列入的来源即使携带 X-Forwarded-For 也不会被信任。
+    trusted-proxies: ${TRUSTED_PROXY_ADDRESSES:}
   mcp:
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
   concurrency:

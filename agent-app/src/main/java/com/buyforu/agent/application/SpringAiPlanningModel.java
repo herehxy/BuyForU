@@ -53,6 +53,7 @@ public final class SpringAiPlanningModel implements PlanningModel {
         // 规划只要结构化 JSON，关掉 thinking。
         this.chatClient = builder.defaultSystem(SYSTEM_PROMPT)
                 .defaultOptions(OpenAiChatOptions.builder()
+                        .timeout(Duration.ofSeconds(40))
                         .extraBody(Map.of("thinking", Map.of("type", "disabled"))))
                 .build();
         this.json = json;
@@ -273,7 +274,9 @@ public final class SpringAiPlanningModel implements PlanningModel {
         static BudgetBound from(String request) {
             if (request == null || request.isBlank()) return NONE;
             boolean floor = request.contains("以上") || request.contains("至少")
-                    || request.contains("不低于") || request.contains("起");
+                    || request.contains("不低于")
+                    || java.util.regex.Pattern.compile("\\d+(?:\\.\\d+)?\\s*(?:元|块|万)?\\s*起(?:步)?")
+                    .matcher(request).find();
             boolean ceiling = request.contains("以内") || request.contains("以下")
                     || request.contains("不超过") || request.contains("最多");
             if (floor && !ceiling) return FLOOR;
@@ -287,7 +290,9 @@ public final class SpringAiPlanningModel implements PlanningModel {
                 constraints.requiredAttributes().get("type"), constraints.query(), request);
         if (known == null) return constraints.category();
         String text = known.toLowerCase();
-        if (text.contains("laptop") || text.contains("notebook") || text.contains("本") || text.contains("电脑")) {
+        if (text.contains("laptop") || text.contains("notebook") || text.contains("笔记本")
+                || text.contains("轻薄本") || text.contains("游戏本") || text.contains("商务本")
+                || text.contains("电脑")) {
             return "laptop";
         }
         if (text.contains("phone") || text.contains("手机")) return "phone";

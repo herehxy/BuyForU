@@ -20,6 +20,7 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import com.buyforu.commerce.port.CommerceOperationException;
 
 /**
  * 公平队列消费者。领取租约的事务在提交后才把任务交给执行器，因此网络等待不占数据库连接。
@@ -87,12 +88,22 @@ public class CommandWorker {
     /** 续租使用独立短事务，绝不和正在进行的网络调用共享连接。 */
     @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}", scheduler = "leaseScheduler")
     void heartbeat() {
+        Instant staleBefore = Instant.now().minusSeconds(90);
         activeLeases.forEach((commandId, lease) -> {
             if (leases.cancellationRequested(lease)) {
                 inFlight.cancel(commandId);
                 Thread worker = activeThreads.get(commandId);
                 if (worker != null) worker.interrupt();
             }
+            commands.find(commandId).ifPresent(command -> {
+                // 心跳不能无限续租一个已经卡住的 DeepSeek 调用，否则前端会一直 RUNNING。
+                if (command.startedAt() != null && command.startedAt().isBefore(staleBefore)) {
+                    inFlight.cancel(commandId);
+                    Thread worker = activeThreads.get(commandId);
+                    if (worker != null) worker.interrupt();
+                    return;
+                }
+            });
             if (!leases.heartbeat(lease, Instant.now().plus(properties.leaseDuration()))) {
                 activeLeases.remove(commandId);
             }
@@ -106,8 +117,15 @@ public class CommandWorker {
 
     @Scheduled(fixedDelay = 5000, scheduler = "leaseScheduler")
     void recoverExpiredLeases() {
-        int recovered = leases.recoverExpired();
-        if (recovered > 0) meters.counter("buyforu_lease_recovered_total").increment(recovered);
+        try {
+            int recovered = leases.recoverExpired();
+            if (recovered > 0) {
+                log.warn("Recovered {} orphan or expired commands", recovered);
+                meters.counter("buyforu_lease_recovered_total").increment(recovered);
+            }
+        } catch (RuntimeException failure) {
+            log.error("Lease recovery failed", failure);
+        }
     }
 
     private void dispatchLane(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor) {
@@ -217,15 +235,34 @@ public class CommandWorker {
     }
 
     private static String classify(Throwable failure) {
+        CommerceOperationException commerce = findCause(failure, CommerceOperationException.class);
+        if (commerce != null) return commerce.code();
         String name = failure.getClass().getSimpleName();
         if (name.contains("CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
         if (name.contains("Timeout")) return "DEPENDENCY_TIMEOUT";
+        if (name.contains("McpContract")) return "MCP_CONTRACT_MISMATCH";
+        if (name.contains("McpInfrastructure")) return "COMMERCE_UNAVAILABLE";
         return "COMMAND_EXECUTION_FAILED";
     }
 
     private static String safeMessage(Throwable failure) {
-        String value = failure.getMessage();
-        return value == null ? failure.getClass().getSimpleName() : value;
+        // error_detail 会被命令状态 API 返回，禁止把 MCP 内容、Prompt、URL 或认证细节原样透出。
+        return switch (classify(failure)) {
+            case "OUT_OF_STOCK" -> "商品库存不足，请重新选择";
+            case "BUDGET_EXCEEDED", "BUDGET_BELOW_MINIMUM" -> "当前应付金额不符合已确认预算";
+            case "DEPENDENCY_TIMEOUT" -> "外部服务响应超时，系统将按安全规则处理";
+            case "DEPENDENCY_CIRCUIT_OPEN", "COMMERCE_UNAVAILABLE" -> "交易服务暂时不可用，请稍后重试";
+            case "MCP_CONTRACT_MISMATCH" -> "Agent 与交易服务版本不兼容，请联系维护人员";
+            case "STALE_EXECUTION" -> "任务已由更新的执行实例接管";
+            default -> "任务执行失败，请使用错误码和 requestId 排查";
+        };
+    }
+
+    private static <T extends Throwable> T findCause(Throwable failure, Class<T> type) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (type.isInstance(current)) return type.cast(current);
+        }
+        return null;
     }
 
     @PreDestroy

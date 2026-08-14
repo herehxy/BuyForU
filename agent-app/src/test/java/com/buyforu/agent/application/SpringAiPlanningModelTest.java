@@ -78,4 +78,21 @@ class SpringAiPlanningModelTest {
         assertEquals("laptop", filled.normalizedConstraints().category());
         assertFalse(filled.clarification().required());
     }
+
+    @Test
+    void unrelatedChineseCharactersDoNotBecomeBudgetOrLaptopSignals() {
+        PlanSpec raw = new PlanSpec(PlanSpec.IntentType.PRODUCT_DISCOVERY,
+                new PlanSpec.ShoppingConstraints("", null, Money.cny("100"), null,
+                        List.of(), List.of(), Map.of(), 1, "address-1", null, 1),
+                new PlanSpec.Clarification(true, List.of("category"), "品类？"),
+                PlanSpec.SearchStrategy.HYBRID, List.of(), List.of(), PlanSpec.FallbackPolicy.safeDefault(), "raw");
+
+        PlanSpec budget = SpringAiPlanningModel.correctBudgetDirection(raw, "我起床后想买这本书，预算100元以内");
+        PlanSpec category = SpringAiPlanningModel.fillInferredCategory(budget, "我想买这本书");
+
+        assertEquals(Money.cny("100"), category.normalizedConstraints().budgetMax());
+        assertNull(category.normalizedConstraints().budgetMin());
+        assertNull(category.normalizedConstraints().category());
+        assertTrue(category.clarification().required());
+    }
 }

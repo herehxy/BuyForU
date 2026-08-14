@@ -1,0 +1,9 @@
+.git
+.idea
+.env
+**/target
+web/node_modules
+web/dist
+reports
+*.iml
+.DS_Store

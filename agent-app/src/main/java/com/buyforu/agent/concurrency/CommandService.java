@@ -70,9 +70,13 @@ public class CommandService {
                 fairQueue.enqueue(command);
             }
         } catch (RuntimeException rejected) {
-            commands.markAdmissionRejected(command.commandId(), rejected instanceof CommandExceptions.AdmissionRejected
-                    ? "QUEUE_CAPACITY_EXCEEDED" : "COORDINATION_UNAVAILABLE");
-            throw rejected;
+            if (rejected instanceof CommandExceptions.AdmissionRejected admissionRejected) {
+                commands.markAdmissionRejected(command.commandId(), "QUEUE_CAPACITY_EXCEEDED");
+                throw admissionRejected;
+            }
+            commands.markAdmissionRejected(command.commandId(), "COORDINATION_UNAVAILABLE");
+            // Lettuce/Redis 原始异常可能包含地址与拓扑信息，统一转成稳定的 503 协议错误。
+            throw new CommandExceptions.CoordinationUnavailable(rejected);
         }
         events.append(runId, command.commandId(), "command.accepted",
                 java.util.Map.of("status", command.status().name(), "queueClass", lane.name()));

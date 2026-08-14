@@ -94,22 +94,34 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
             boolean write = effect != null && !effect.isEmpty();
             CallToolResult result = dependencies.call(write ? DependencyExecutor.Dependency.MCP_WRITE
                             : DependencyExecutor.Dependency.MCP_READ, Duration.ofSeconds(write ? 5 : 3), 2,
-                    () -> client.callTool(CallToolRequest.builder().name(toolName).arguments(arguments).build()));
-            if (Boolean.TRUE.equals(result.isError())) {
-                String error = String.valueOf(result.content());
-                Matcher code = COMMERCE_CODE.matcher(error);
-                if (code.find()) throw new CommerceOperationException(code.group(1), error);
-                throw new IllegalStateException("Commerce MCP transport/tool failure: " + toolName + " " + error);
-            }
-            if (result.structuredContent() == null) {
-                throw new IllegalStateException("Commerce MCP tool returned no structured content: " + toolName);
-            }
+                    () -> validate(toolName, client.callTool(
+                            CallToolRequest.builder().name(toolName).arguments(arguments).build())));
             audit.completed(auditId, json.writeValueAsString(result.structuredContent()));
             return json.convertValue(result.structuredContent(), resultType);
         } catch (RuntimeException failure) {
             audit.failed(auditId, failure);
             throw failure;
         }
+    }
+
+    /**
+     * 必须在 Resilience4j 装饰的 Callable 内分类 Tool 结果：领域拒绝不计入熔断，
+     * 传输/服务故障计入熔断并允许只读或同 effectId 写请求重试，Schema 错误则立即暴露给开发者。
+     */
+    private static CallToolResult validate(String toolName, CallToolResult result) {
+        if (Boolean.TRUE.equals(result.isError())) {
+            String error = String.valueOf(result.content());
+            Matcher code = COMMERCE_CODE.matcher(error);
+            if (code.find()) throw new CommerceOperationException(code.group(1), error);
+            if (error.contains("input validation failed") || error.contains("JSON schema validation")) {
+                throw new McpContractException("Commerce MCP contract mismatch for " + toolName + ": " + error);
+            }
+            throw new McpInfrastructureException("Commerce MCP tool failed: " + toolName, null);
+        }
+        if (result.structuredContent() == null) {
+            throw new McpInfrastructureException("Commerce MCP tool returned no structured content: " + toolName, null);
+        }
+        return result;
     }
 
     @SuppressWarnings("unchecked")
@@ -129,4 +141,14 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     private record ReleaseResult(String reservationId, boolean released) { }
     private record AddressList(List<DeliveryAddress> addresses) { }
     private record InventoryList(List<InventoryItem> items) { }
+
+    /** MCP 服务或传输不可用；消息不携带完整请求/响应，避免命令状态接口泄露业务数据。 */
+    public static final class McpInfrastructureException extends RuntimeException {
+        McpInfrastructureException(String message, Throwable cause) { super(message, cause); }
+    }
+
+    /** Agent 与 Commerce 的 Schema 版本不一致，重试不会改善，必须修复部署。 */
+    public static final class McpContractException extends IllegalArgumentException {
+        McpContractException(String message) { super(message); }
+    }
 }

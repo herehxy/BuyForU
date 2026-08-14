@@ -88,6 +88,8 @@ public class JdbcCommerceEngine implements CommerceGateway {
     @Override
     public SearchResult searchProducts(SearchRequest request) {
         LocalDate deliveryDate = resolveDeliveryDate(request.addressId(), request.userId());
+        // 一次搜索只读取一次促销/运费规则，避免候选数量扩大后产生每 SKU 两次查询的 N+1。
+        SearchPricing pricing = loadSearchPricing(clock.instant());
         List<ProductCandidate> candidates = jdbc.query("""
                 SELECT p.product_id, s.sku_id, p.name, p.brand, p.attributes::text,
                        s.unit_price, i.available_quantity
@@ -114,7 +116,7 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 .filter(ProductCandidate::available)
                 // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
                 .filter(candidate -> matchesBudget(candidate.displayPrice().amount(), request.quantity(),
-                        request.budgetMax(), request.budgetMin()))
+                        request.budgetMax(), request.budgetMin(), pricing))
                 .limit(request.limit())
                 .toList();
         return new SearchResult(candidates, clock.instant());
@@ -138,22 +140,17 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     private PricedItems priceItems(BigDecimal unitPrice, int quantity, Instant now) {
-        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
-        List<DiscountLine> discounts = new ArrayList<>();
-        BigDecimal discount = BigDecimal.ZERO;
-        List<PromotionRow> promotions = jdbc.query("""
-                SELECT promotion_code, description, discount_amount
+        return priceItems(unitPrice, quantity, loadSearchPricing(now));
+    }
+
+    private SearchPricing loadSearchPricing(Instant now) {
+        List<SearchPromotionRow> promotions = jdbc.query("""
+                SELECT promotion_code, description, minimum_spend, discount_amount
                 FROM commerce_schema.promotion_rule
-                WHERE active AND starts_at <= ? AND ends_at > ? AND minimum_spend <= ?
+                WHERE active AND starts_at <= ? AND ends_at > ?
                 ORDER BY priority DESC, discount_amount DESC, promotion_code
-                LIMIT 1
-                """, (result, row) -> new PromotionRow(result.getString(1), result.getString(2),
-                result.getBigDecimal(3)), Timestamp.from(now), Timestamp.from(now), itemAmount);
-        if (!promotions.isEmpty()) {
-            PromotionRow promotion = promotions.getFirst();
-            discount = promotion.discountAmount().min(itemAmount);
-            discounts.add(new DiscountLine(promotion.code(), promotion.description(), new Money(discount, "CNY")));
-        }
+                """, (result, row) -> new SearchPromotionRow(result.getString(1), result.getString(2),
+                result.getBigDecimal(3), result.getBigDecimal(4)), Timestamp.from(now), Timestamp.from(now));
         ShippingRule shippingRule = jdbc.query("""
                 SELECT free_shipping_threshold, standard_fee
                 FROM commerce_schema.shipping_rule WHERE active
@@ -161,13 +158,28 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, (result, row) -> new ShippingRule(result.getBigDecimal(1), result.getBigDecimal(2)))
                 .stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SHIPPING_RULE_MISSING", "no active shipping rule"));
+        return new SearchPricing(promotions, shippingRule);
+    }
+
+    private static PricedItems priceItems(BigDecimal unitPrice, int quantity, SearchPricing pricing) {
+        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
+        List<DiscountLine> discounts = new ArrayList<>();
+        BigDecimal discount = BigDecimal.ZERO;
+        SearchPromotionRow promotion = pricing.promotions().stream()
+                .filter(row -> row.minimumSpend().compareTo(itemAmount) <= 0).findFirst().orElse(null);
+        if (promotion != null) {
+            discount = promotion.discountAmount().min(itemAmount);
+            discounts.add(new DiscountLine(promotion.code(), promotion.description(), new Money(discount, "CNY")));
+        }
+        ShippingRule shippingRule = pricing.shippingRule();
         BigDecimal shipping = itemAmount.compareTo(shippingRule.freeShippingThreshold()) >= 0
                 ? BigDecimal.ZERO : shippingRule.standardFee();
         return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
     }
 
-    private boolean matchesBudget(BigDecimal unitPrice, int quantity, Money budgetMax, Money budgetMin) {
-        BigDecimal payable = priceItems(unitPrice, quantity, clock.instant()).payable();
+    private static boolean matchesBudget(BigDecimal unitPrice, int quantity, Money budgetMax, Money budgetMin,
+                                         SearchPricing pricing) {
+        BigDecimal payable = priceItems(unitPrice, quantity, pricing).payable();
         if (budgetMax != null && payable.compareTo(budgetMax.amount()) > 0) return false;
         return budgetMin == null || payable.compareTo(budgetMin.amount()) >= 0;
     }
@@ -551,8 +563,10 @@ public class JdbcCommerceEngine implements CommerceGateway {
     private record ExpiredReservation(String reservationId, String skuId, int quantity) { }
     private record EffectRow(String operation, String requestHash, String status, String result) { }
     private record AddressRow(String userId, int deliveryDays) { }
-    private record PromotionRow(String code, String description, BigDecimal discountAmount) { }
+    private record SearchPromotionRow(String code, String description, BigDecimal minimumSpend,
+                                      BigDecimal discountAmount) { }
     private record ShippingRule(BigDecimal freeShippingThreshold, BigDecimal standardFee) { }
+    private record SearchPricing(List<SearchPromotionRow> promotions, ShippingRule shippingRule) { }
     private record PricedItems(BigDecimal itemAmount, List<DiscountLine> discounts,
                                BigDecimal shipping, BigDecimal payable) { }
 }

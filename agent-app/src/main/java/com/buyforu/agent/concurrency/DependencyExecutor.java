@@ -98,7 +98,7 @@ public final class DependencyExecutor {
         if (failure instanceof IllegalArgumentException) return false;
         String name = failure.getClass().getSimpleName();
         return name.contains("Timeout") || name.contains("Connect") || name.contains("Transport")
-                || name.contains("ResourceAccess") || name.contains("WebClient");
+                || name.contains("Infrastructure") || name.contains("ResourceAccess") || name.contains("WebClient");
     }
 
     private static Duration remaining(Duration configured, Instant deadline) {

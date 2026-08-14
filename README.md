@@ -2,7 +2,7 @@
 
 BuyForU 是一个以真实交易约束为边界的电商购物 Agent。Agent 负责理解需求、受限规划、检索和推荐；金额、优惠、履约、库存预占与订单创建只由 Commerce Domain 决定。
 
-项目的完整需求边界、架构、一致性、高并发设计和面试问答见 [项目设计与面试指南](docs/PROJECT_DESIGN.md)。第一次阅读代码也可以先看 [中文代码结构导览](docs/CODE_GUIDE.md)；需要逐文件查找职责时看 [文件职责索引](docs/FILE_INDEX.md)。
+项目的完整需求边界、架构、一致性、高并发设计和面试问答见 [项目设计与面试指南](docs/PROJECT_DESIGN.md)。本轮发现的问题、修复依据和回归方式见 [全链路 Review 与修复记录](docs/CORRECTNESS_REVIEW_FIXES.md)。第一次阅读代码也可以先看 [中文代码结构导览](docs/CODE_GUIDE.md)；需要逐文件查找职责时看 [文件职责索引](docs/FILE_INDEX.md)。
 
 ## 当前实现
 
