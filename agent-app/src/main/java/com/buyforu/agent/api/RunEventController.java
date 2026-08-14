@@ -50,9 +50,19 @@ public class RunEventController {
             throw new com.buyforu.agent.concurrency.CommandExceptions.AdmissionRejected(
                     "SSE connection capacity exceeded", 5);
         }
+        if (lastEventId < 0) {
+            connectionPermits.release();
+            throw new IllegalArgumentException("Last-Event-ID cannot be negative");
+        }
+        notifier.retain(runId);
         SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
         java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
-        Runnable release = () -> { if (released.compareAndSet(false, true)) connectionPermits.release(); };
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) {
+                notifier.release(runId);
+                connectionPermits.release();
+            }
+        };
         emitter.onCompletion(release); emitter.onTimeout(release); emitter.onError(ignored -> release.run());
         streams.submit(() -> publish(runId, lastEventId, emitter));
         return emitter;
@@ -66,7 +76,7 @@ public class RunEventController {
                 var batch = events.after(runId, cursor, 100);
                 for (var event : batch) {
                     emitter.send(SseEmitter.event().id(Long.toString(event.eventId())).name(event.eventType())
-                            .data(event.payload()));
+                            .data(Map.of("commandId", event.commandId(), "payload", event.payload())));
                     cursor = event.eventId();
                 }
                 long now = System.currentTimeMillis();

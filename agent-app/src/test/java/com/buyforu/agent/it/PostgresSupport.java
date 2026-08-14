@@ -28,7 +28,9 @@ final class PostgresSupport {
                 .dataSource(dataSource)
                 .schemas("agent_schema")
                 .defaultSchema("agent_schema")
-                .locations("classpath:db/migration")
+                // agent-app 的集成测试 classpath 还包含 commerce-service test fixture；
+                // 使用模块自己的文件目录，避免两个模块都叫 V1 的迁移被 Flyway 误判为重复版本。
+                .locations("filesystem:src/main/resources/db/migration")
                 .load()
                 .migrate();
         return dataSource;

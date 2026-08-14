@@ -8,7 +8,8 @@
   "sslRequired": "external",
   "roles": {
     "realm": [
-      { "name": "knowledge-admin", "description": "Can ingest versioned RAG knowledge" }
+      { "name": "knowledge-admin", "description": "Can ingest versioned RAG knowledge" },
+      { "name": "monitoring", "description": "Can scrape Agent Prometheus metrics" }
     ]
   },
   "clients": [

@@ -33,7 +33,8 @@ public class McpSecurityConfiguration {
                 .addFilterBefore(new ServiceTokenFilter(serviceToken), AbstractPreAuthenticatedProcessingFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                        .requestMatchers("/mcp", "/mcp/**").permitAll()
+                        // 两个路径均由前置常量时间 ServiceTokenFilter 验证内部凭证。
+                        .requestMatchers("/mcp", "/mcp/**", "/actuator/prometheus").permitAll()
                         .anyRequest().denyAll())
                 .build();
     }
@@ -47,7 +48,9 @@ public class McpSecurityConfiguration {
 
         @Override
         protected boolean shouldNotFilter(HttpServletRequest request) {
-            return !request.getRequestURI().equals("/mcp") && !request.getRequestURI().startsWith("/mcp/");
+            return !request.getRequestURI().equals("/mcp")
+                    && !request.getRequestURI().startsWith("/mcp/")
+                    && !request.getRequestURI().equals("/actuator/prometheus");
         }
 
         @Override

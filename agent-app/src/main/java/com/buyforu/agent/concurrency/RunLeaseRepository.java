@@ -49,7 +49,9 @@ public class RunLeaseRepository {
                     UPDATE agent_schema.agent_run_execution SET active_command_id=NULL,lease_owner=NULL,
                         lease_until=NULL,updated_at=now() WHERE run_id=? AND active_command_id=?
                     """, command.runId(), row.activeCommandId());
-            if (recovered == 1) return Optional.empty();
+            // 若正在领取的就是刚恢复的同一命令，可在本事务内直接换新 epoch；
+            // 若是另一个命令，则先让旧命令重新进入公平队列，避免越过 run 内顺序。
+            if (recovered == 1 && !row.activeCommandId().equals(command.commandId())) return Optional.empty();
         }
         long epoch = row.epoch() + 1;
         int updated = jdbc.update("""
@@ -58,7 +60,8 @@ public class RunLeaseRepository {
                 """, epoch, command.commandId(), owner, Timestamp.from(leaseUntil), command.runId());
         int commandUpdated = jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='RUNNING',attempts=attempts+1,started_at=COALESCE(started_at,now()),
-                    execution_epoch=? WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT') AND available_at<=now()
+                    execution_epoch=? WHERE command_id=?
+                    AND (status='QUEUED' OR (status='RETRY_WAIT' AND available_at<=now()))
                 """, epoch, command.commandId());
         if (updated != 1 || commandUpdated != 1) throw new ClaimConflict();
         Long stateVersion = jdbc.queryForObject("""
@@ -74,8 +77,7 @@ public class RunLeaseRepository {
         int recovered = jdbc.update("""
                 UPDATE agent_schema.agent_command c SET
                     status=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
-                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at
-                                      ELSE now()+interval '1 second' END,
+                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at ELSE now() END,
                     error_code=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
                                     ELSE 'WORKER_LEASE_EXPIRED' END,
                     completed_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN now() ELSE NULL END
@@ -90,8 +92,7 @@ public class RunLeaseRepository {
         recovered += jdbc.update("""
                 UPDATE agent_schema.agent_command c SET
                     status=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
-                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at
-                                      ELSE now()+interval '1 second' END,
+                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at ELSE now() END,
                     error_code=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
                                     ELSE 'ORPHAN_RUNNING_COMMAND' END,
                     completed_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN now() ELSE NULL END
@@ -108,8 +109,7 @@ public class RunLeaseRepository {
         return jdbc.update("""
                 UPDATE agent_schema.agent_command SET
                     status=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
-                    available_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN available_at
-                                      ELSE now()+interval '1 second' END,
+                    available_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN available_at ELSE now() END,
                     error_code=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
                                     ELSE 'WORKER_LEASE_EXPIRED' END,
                     completed_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN now() ELSE NULL END

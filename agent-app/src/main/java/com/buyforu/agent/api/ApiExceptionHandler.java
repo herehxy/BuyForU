@@ -11,6 +11,10 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import com.buyforu.agent.concurrency.CommandExceptions;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 
 /**
  * 将领域错误转换为 RFC 9457 ProblemDetail，并附加 requestId；未知异常只写服务日志，不泄露堆栈。
@@ -28,7 +32,7 @@ public class ApiExceptionHandler {
             case "SKU_NOT_FOUND", "RESERVATION_NOT_FOUND", "SNAPSHOT_NOT_FOUND",
                  "DELIVERY_ZONE_NOT_FOUND" -> HttpStatus.NOT_FOUND;
             case "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE", "SNAPSHOT_EXPIRED", "APPROVAL_EXPIRED",
-                 "EFFECT_CONFLICT", "EFFECT_IN_PROGRESS", "BUDGET_EXCEEDED" -> HttpStatus.CONFLICT;
+                 "EFFECT_CONFLICT", "EFFECT_IN_PROGRESS", "BUDGET_EXCEEDED", "BUDGET_BELOW_MINIMUM" -> HttpStatus.CONFLICT;
             default -> HttpStatus.UNPROCESSABLE_ENTITY;
         };
         ProblemDetail detail = ProblemDetail.forStatus(status);
@@ -45,6 +49,19 @@ public class ApiExceptionHandler {
         detail.setTitle("Invalid request");
         detail.setDetail(exception.getMessage());
         addRequestId(detail);
+        return detail;
+    }
+
+    @ExceptionHandler({MethodArgumentNotValidException.class, HandlerMethodValidationException.class,
+            HttpMessageNotReadableException.class, MissingRequestHeaderException.class})
+    ProblemDetail invalidHttpRequest(Exception exception) {
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        detail.setTitle("Invalid request");
+        // Bean Validation 的内部对象路径不属于稳定 API，统一返回可公开提示并在日志保留类型。
+        detail.setDetail("Request body, path, query parameter, or required header is invalid.");
+        detail.setProperty("code", "REQUEST_VALIDATION_FAILED");
+        addRequestId(detail);
+        log.debug("Request validation rejected: {}", exception.getMessage());
         return detail;
     }
 
