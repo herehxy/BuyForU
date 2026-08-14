@@ -42,6 +42,8 @@ class InMemoryCommerceEngineTest {
         assertEquals(order.orderId(), repeated.orderId());
         assertEquals(OrderStatus.PENDING_PAYMENT, order.status());
         assertEquals(1, engine.orderCount());
+        assertEquals(order.orderId(), engine.findOrderBySnapshot("u-1", first.snapshotId())
+                .orElseThrow().orderId());
     }
 
     @Test

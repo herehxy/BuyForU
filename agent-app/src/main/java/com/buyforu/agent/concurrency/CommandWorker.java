@@ -90,20 +90,15 @@ public class CommandWorker {
     void heartbeat() {
         Instant staleBefore = Instant.now().minusSeconds(90);
         activeLeases.forEach((commandId, lease) -> {
-            if (leases.cancellationRequested(lease)) {
+            boolean cancelRequested = leases.cancellationRequested(lease);
+            Instant startedAt = commands.find(commandId).map(AgentCommand::startedAt).orElse(null);
+            if (cancelRequested || !shouldRenewLease(startedAt, staleBefore)) {
                 inFlight.cancel(commandId);
                 Thread worker = activeThreads.get(commandId);
                 if (worker != null) worker.interrupt();
+                // 取消或卡住后不能再续租，否则 recoverExpired 永远看不到这条 RUNNING。
+                return;
             }
-            commands.find(commandId).ifPresent(command -> {
-                // 心跳不能无限续租一个已经卡住的 DeepSeek 调用，否则前端会一直 RUNNING。
-                if (command.startedAt() != null && command.startedAt().isBefore(staleBefore)) {
-                    inFlight.cancel(commandId);
-                    Thread worker = activeThreads.get(commandId);
-                    if (worker != null) worker.interrupt();
-                    return;
-                }
-            });
             if (!leases.heartbeat(lease, Instant.now().plus(properties.leaseDuration()))) {
                 activeLeases.remove(commandId);
             }
@@ -122,6 +117,11 @@ public class CommandWorker {
             if (recovered > 0) {
                 log.warn("Recovered {} orphan or expired commands", recovered);
                 meters.counter("buyforu_lease_recovered_total").increment(recovered);
+                // 租约恢复后立刻丢掉该命令持有的用户许可，避免再堵满 240 秒。
+                for (AgentCommand command : commands.recentlyRecovered(15)) {
+                    try { fairQueue.releaseUser(command.userId(), command.commandId()); }
+                    catch (RuntimeException ignored) { }
+                }
             }
         } catch (RuntimeException failure) {
             log.error("Lease recovery failed", failure);
@@ -234,14 +234,17 @@ public class CommandWorker {
         };
     }
 
-    private static String classify(Throwable failure) {
+    static boolean shouldRenewLease(Instant startedAt, Instant staleBefore) {
+        return startedAt == null || !startedAt.isBefore(staleBefore);
+    }
+
+    static String classify(Throwable failure) {
         CommerceOperationException commerce = findCause(failure, CommerceOperationException.class);
         if (commerce != null) return commerce.code();
-        String name = failure.getClass().getSimpleName();
-        if (name.contains("CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
-        if (name.contains("Timeout")) return "DEPENDENCY_TIMEOUT";
-        if (name.contains("McpContract")) return "MCP_CONTRACT_MISMATCH";
-        if (name.contains("McpInfrastructure")) return "COMMERCE_UNAVAILABLE";
+        if (causeNameContains(failure, "McpContract")) return "MCP_CONTRACT_MISMATCH";
+        if (causeNameContains(failure, "McpInfrastructure")) return "COMMERCE_UNAVAILABLE";
+        if (causeNameContains(failure, "CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
+        if (causeNameContains(failure, "Timeout")) return "DEPENDENCY_TIMEOUT";
         return "COMMAND_EXECUTION_FAILED";
     }
 
@@ -256,6 +259,13 @@ public class CommandWorker {
             case "STALE_EXECUTION" -> "任务已由更新的执行实例接管";
             default -> "任务执行失败，请使用错误码和 requestId 排查";
         };
+    }
+
+    private static boolean causeNameContains(Throwable failure, String token) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current.getClass().getSimpleName().contains(token)) return true;
+        }
+        return false;
     }
 
     private static <T extends Throwable> T findCause(Throwable failure, Class<T> type) {

@@ -40,6 +40,22 @@ class CommerceMcpToolsSchemaTest {
         assertFalse(required.contains("budgetMax"));
     }
 
+    @Test
+    void orderLookupKeepsMissingOrderOptional() throws Exception {
+        Method method = SchemaProbe.class.getMethod("probe", CommerceMcpTools.OrderLookupResult.class);
+        JsonNode root = json.readTree(McpJsonSchemaGenerator.generateForMethodInput(method));
+        JsonNode nested = resolve(root, root.path("properties").path("result"));
+        Set<String> required = new HashSet<>();
+        nested.path("required").forEach(item -> required.add(item.asText()));
+        assertTrue(required.contains("found"));
+        assertFalse(required.contains("order"));
+    }
+
+    public static final class SchemaProbe {
+        public void probe(CommerceMcpTools.OrderLookupResult result) {
+        }
+    }
+
     private Set<String> nestedRequired(Method method, String property) {
         JsonNode root = json.readTree(McpJsonSchemaGenerator.generateForMethodInput(method));
         JsonNode nested = resolve(root, root.path("properties").path(property));

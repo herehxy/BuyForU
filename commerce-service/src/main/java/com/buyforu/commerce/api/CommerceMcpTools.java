@@ -90,7 +90,23 @@ public final class CommerceMcpTools {
         return commerce.createOrder(command, effect);
     }
 
+    @McpTool(name = "commerce_order_find_by_snapshot",
+            description = "Find an existing order created from a confirmable snapshot without creating side effects",
+            generateOutputSchema = true)
+    public OrderLookupResult findOrderBySnapshot(
+            @McpToolParam(description = "Authenticated shopper", required = true) String userId,
+            @McpToolParam(description = "Confirmable snapshot identifier", required = true) String snapshotId) {
+        return commerce.findOrderBySnapshot(userId, snapshotId)
+                .map(order -> new OrderLookupResult(true, order))
+                .orElseGet(() -> new OrderLookupResult(false, null));
+    }
+
     public record ReleaseResult(String reservationId, boolean released) { }
+
+    public record OrderLookupResult(
+            @McpToolParam(description = "Whether an order exists for the snapshot", required = true) boolean found,
+            @McpToolParam(description = "Existing order; omitted when not found", required = false) Order order
+    ) { }
     public record AddressList(java.util.List<DeliveryAddress> addresses) { }
     public record InventoryList(java.util.List<InventoryItem> items) { }
 

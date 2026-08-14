@@ -54,4 +54,9 @@ public final class McpCommerceGatewayAdapter implements CommerceGateway {
     public Order createOrder(CreateOrderCommand command, EffectContext effectContext) {
         return client.orderCreate(command, effectContext);
     }
+
+    @Override
+    public java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        return client.orderFindBySnapshot(userId, snapshotId);
+    }
 }

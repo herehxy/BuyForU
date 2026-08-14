@@ -24,26 +24,30 @@ import java.security.MessageDigest;
 public class McpSecurityConfiguration {
     @Bean
     SecurityFilterChain commerceSecurity(HttpSecurity http,
-                                         @Value("${buyforu.mcp.service-token}") String serviceToken) throws Exception {
+                                         @Value("${buyforu.mcp.service-token}") String serviceToken,
+                                         @Value("${buyforu.metrics.token:}") String metricsToken) throws Exception {
         if (serviceToken == null || serviceToken.length() < 32) {
             throw new IllegalStateException("COMMERCE_MCP_SERVICE_TOKEN must contain at least 32 characters");
         }
         return http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .addFilterBefore(new ServiceTokenFilter(serviceToken), AbstractPreAuthenticatedProcessingFilter.class)
+                .addFilterBefore(new ServiceTokenFilter(serviceToken, metricsToken),
+                        AbstractPreAuthenticatedProcessingFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                        // 两个路径均由前置常量时间 ServiceTokenFilter 验证内部凭证。
                         .requestMatchers("/mcp", "/mcp/**", "/actuator/prometheus").permitAll()
                         .anyRequest().denyAll())
                 .build();
     }
 
     private static final class ServiceTokenFilter extends OncePerRequestFilter {
-        private final byte[] expected;
+        private final byte[] mcpToken;
+        private final byte[] metricsToken;
 
-        private ServiceTokenFilter(String expected) {
-            this.expected = expected.getBytes(StandardCharsets.UTF_8);
+        private ServiceTokenFilter(String serviceToken, String metricsToken) {
+            this.mcpToken = serviceToken.getBytes(StandardCharsets.UTF_8);
+            this.metricsToken = metricsToken == null || metricsToken.isBlank()
+                    ? null : metricsToken.getBytes(StandardCharsets.UTF_8);
         }
 
         @Override
@@ -56,7 +60,11 @@ public class McpSecurityConfiguration {
         @Override
         protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                         FilterChain chain) throws ServletException, IOException {
-            String token = request.getHeader("X-BuyForU-Service-Token");
+            boolean prometheus = request.getRequestURI().equals("/actuator/prometheus");
+            byte[] expected = prometheus && metricsToken != null ? metricsToken : mcpToken;
+            String header = prometheus && metricsToken != null
+                    ? "X-BuyForU-Metrics-Token" : "X-BuyForU-Service-Token";
+            String token = request.getHeader(header);
             // 常量时间比较，避免通过响应耗时逐字节猜测服务令牌。
             if (token == null || !MessageDigest.isEqual(expected, token.getBytes(StandardCharsets.UTF_8))) {
                 response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "invalid service credential");

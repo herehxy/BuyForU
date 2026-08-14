@@ -1,5 +1,6 @@
 package com.buyforu.commerce.application;
 
+import com.buyforu.commerce.port.CatalogAttributeNormalizer;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +22,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -90,6 +92,7 @@ public class JdbcCommerceEngine implements CommerceGateway {
         LocalDate deliveryDate = resolveDeliveryDate(request.addressId(), request.userId());
         // 一次搜索只读取一次促销/运费规则，避免候选数量扩大后产生每 SKU 两次查询的 N+1。
         SearchPricing pricing = loadSearchPricing(clock.instant());
+        int fetchLimit = Math.min(200, Math.max(request.limit() * 10, 50));
         List<ProductCandidate> candidates = jdbc.query("""
                 SELECT p.product_id, s.sku_id, p.name, p.brand, p.attributes::text,
                        s.unit_price, i.available_quantity
@@ -98,13 +101,16 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
                 WHERE s.status = 'ACTIVE'
                   AND (? = '' OR lower(p.category) = lower(?))
+                  AND i.available_quantity >= ?
                 ORDER BY s.unit_price
+                LIMIT ?
                 """, (result, row) -> new ProductCandidate(
                         result.getString("product_id"), result.getString("sku_id"), result.getString("name"),
                         result.getString("brand"), readAttributes(result.getString("attributes")),
                         new Money(result.getBigDecimal("unit_price"), "CNY"),
-                        result.getInt("available_quantity") >= request.quantity(), deliveryDate),
-                normalized(request.category()), normalized(request.category())).stream()
+                        true, deliveryDate),
+                normalized(request.category()), normalized(request.category()),
+                request.quantity(), fetchLimit).stream()
                 .filter(candidate -> matchesQuery(request.query(), candidate))
                 .filter(candidate -> request.excludedBrands().stream()
                         .noneMatch(brand -> brand.equalsIgnoreCase(candidate.brand())))
@@ -113,7 +119,6 @@ public class JdbcCommerceEngine implements CommerceGateway {
                         .allMatch(entry -> entry.getValue().equalsIgnoreCase(candidate.attributes().get(entry.getKey()))))
                 .filter(candidate -> request.deliveryBy() == null
                         || !candidate.deliveryDate().isAfter(request.deliveryBy()))
-                .filter(ProductCandidate::available)
                 // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
                 .filter(candidate -> matchesBudget(candidate.displayPrice().amount(), request.quantity(),
                         request.budgetMax(), request.budgetMin(), pricing))
@@ -380,6 +385,27 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, UUID.randomUUID().toString(), order.orderId(), json.writeValueAsString(order));
         completeEffect(effect, order.orderId(), order);
         return order;
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        if (userId == null || userId.isBlank() || snapshotId == null || snapshotId.isBlank()) {
+            throw new IllegalArgumentException("userId and snapshotId are required");
+        }
+        // 先验证快照归属，避免把其他用户的快照当成“没有订单”。
+        String owner = jdbc.query("""
+                SELECT user_id FROM commerce_schema.confirmable_snapshot WHERE snapshot_id=?
+                """, (result, row) -> result.getString(1), snapshotId).stream().findFirst()
+                .orElseThrow(() -> new CommerceException("SNAPSHOT_NOT_FOUND", "snapshot not found"));
+        if (!userId.equals(owner)) {
+            throw new CommerceException("SNAPSHOT_USER_MISMATCH", "snapshot belongs to another user");
+        }
+        return jdbc.query("""
+                SELECT order_payload::text FROM commerce_schema.orders
+                WHERE source_snapshot_id=? AND user_id=?
+                """, (result, row) -> json.readValue(result.getString(1), Order.class), snapshotId, userId)
+                .stream().findFirst();
     }
 
     private LocalDate resolveDeliveryDate(String addressId, String expectedUserId) {

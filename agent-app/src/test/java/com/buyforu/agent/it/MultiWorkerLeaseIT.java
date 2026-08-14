@@ -2,6 +2,7 @@ package com.buyforu.agent.it;
 
 import com.buyforu.agent.concurrency.AgentCommand;
 import com.buyforu.agent.concurrency.CommandRepository;
+import com.buyforu.agent.concurrency.ExecutionContext;
 import com.buyforu.agent.concurrency.RunLeaseRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,8 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 两个 Worker 同时 claim 同一个 run，只能有一个拿到租约。 */
 @Testcontainers(disabledWithoutDocker = true)
@@ -79,10 +82,30 @@ class MultiWorkerLeaseIT {
         assertEquals(firstLease.orElseThrow().epoch() + 1, secondLease.orElseThrow().epoch());
     }
 
+    @Test
+    void currentControlCommandLeaseIsNotAConflictForItself() {
+        AgentCommand cancel = insert("run-cancel", "user-a", AgentCommand.CommandType.CANCEL,
+                AgentCommand.QueueClass.CONTROL);
+        RunLeaseRepository.Lease lease = transactions.execute(status ->
+                first.claim(cancel, "worker-control", Instant.now().plusSeconds(30)).orElseThrow());
+
+        // 在 Worker 上下文外，这仍是一条活租约。
+        assertTrue(first.hasConflictingLiveLease(cancel.runId()));
+        ExecutionContext context = new ExecutionContext(cancel.commandId(), cancel.runId(), lease.epoch(),
+                cancel.deadlineAt(), lease.stateVersion());
+        // 进入该 CONTROL Worker 后，它不能把自己当成下单 Worker。
+        assertFalse(ExecutionContext.call(context, () -> first.hasConflictingLiveLease(cancel.runId())));
+    }
+
     private AgentCommand insert(String runId, String userId) {
+        return insert(runId, userId, AgentCommand.CommandType.START, AgentCommand.QueueClass.PLANNING);
+    }
+
+    private AgentCommand insert(String runId, String userId, AgentCommand.CommandType type,
+                                AgentCommand.QueueClass queueClass) {
         Instant now = Instant.now();
         AgentCommand command = new AgentCommand(UUID.randomUUID(), runId, userId,
-                AgentCommand.CommandType.START, AgentCommand.QueueClass.PLANNING,
+                type, queueClass,
                 "key-" + UUID.randomUUID(), "hash", "{}", AgentCommand.CommandStatus.QUEUED,
                 0, now, now.plusSeconds(60), null, null, null, null, now, null, null);
         return commands.insert(command);

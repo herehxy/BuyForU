@@ -4,7 +4,8 @@ import com.buyforu.agent.domain.PlanSpec;
 import com.buyforu.agent.domain.ShoppingAgentState;
 import com.buyforu.agent.infrastructure.memory.InMemoryAgentRunStore;
 import com.buyforu.commerce.application.InMemoryCommerceEngine;
-import com.buyforu.commerce.port.model.CommerceModels.Money;
+import com.buyforu.commerce.port.CommerceGateway;
+import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -174,6 +175,154 @@ class ShoppingWorkflowServiceTest {
         ShoppingAgentState searched = workflow.clarify(waiting.runId(), "user", "使用 address-1");
         assertEquals(ShoppingAgentState.Phase.PRESENTING_CANDIDATES, searched.phase());
         assertEquals("laptop", searched.originalRequest());
+    }
+
+    @Test
+    void cancelDuringPendingPrepareDoesNotReplan() {
+        java.util.concurrent.atomic.AtomicInteger replans = new java.util.concurrent.atomic.AtomicInteger();
+        DeterministicPlanningModel delegate = new DeterministicPlanningModel();
+        PlanningModel model = new PlanningModel() {
+            @Override
+            public PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints constraints) {
+                return delegate.createPlan(request, constraints);
+            }
+
+            @Override
+            public PlanSpec replan(String request, PlanSpec.ShoppingConstraints constraints,
+                                   String reason, int attempt) {
+                replans.incrementAndGet();
+                return delegate.replan(request, constraints, reason, attempt);
+            }
+
+            @Override
+            public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints,
+                                              String instruction, List<String> fields) {
+                return delegate.relaxConstraints(request, constraints, instruction, fields);
+            }
+        };
+        InMemoryAgentRunStore store = new InMemoryAgentRunStore();
+        InMemoryCommerceEngine commerce = InMemoryCommerceEngine.seeded(clock);
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce, model, store,
+                new InMemoryConversationMemory(), clock);
+
+        ShoppingAgentState searched = workflow.start("conversation-cancel-prepare", "user-1", "laptop",
+                constraints());
+        store.save(new ShoppingAgentState(searched.runId(), searched.conversationId(), searched.userId(),
+                searched.traceId(), searched.originalRequest(), searched.planSpec(),
+                ShoppingAgentState.Phase.PREPARING_CONFIRMABLE_ORDER, searched.candidateSet(), 0,
+                null, null, new ShoppingAgentState.ActiveEffect("effect-prepare", "PREPARE_CONFIRMABLE_ORDER",
+                "hash", ShoppingAgentState.EffectStatus.PENDING_EFFECT),
+                0, 0, searched.planVersion(), null, null, clock.instant()));
+
+        ShoppingAgentState cancelled = workflow.cancel(searched.runId(), "user-1");
+        assertEquals(ShoppingAgentState.Phase.CANCELLED, cancelled.phase());
+        assertEquals(0, replans.get());
+        assertEquals(0, commerce.orderCount());
+    }
+
+    @Test
+    void ranksNormalizedSpecKeysAheadOfRawModelAliases() {
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),
+                new DeterministicPlanningModel(), new InMemoryAgentRunStore(), new InMemoryConversationMemory(), clock);
+        PlanSpec.ShoppingConstraints spec = new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"),
+                null, List.of(), List.of(), Map.of("memoryGB", "16", "storageGB", "1TB"), 1, "address-1",
+                LocalDate.of(2026, 8, 13), 1);
+        ShoppingAgentState searched = workflow.start("conversation-rank", "user-1", "16GB 1TB 轻薄本", spec);
+        assertEquals("sku-air-16", searched.candidateSet().getFirst().skuId());
+    }
+
+    @Test
+    void refusesCancelWhileCreateLeaseIsLive() {
+        InMemoryAgentRunStore store = new InMemoryAgentRunStore();
+        InMemoryCommerceEngine commerce = InMemoryCommerceEngine.seeded(clock);
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce,
+                new DeterministicPlanningModel(), store, new InMemoryConversationMemory(), clock, runId -> true);
+        ShoppingAgentState searched = workflow.start("conversation-live-create", "user-1", "laptop", constraints());
+        ShoppingAgentState waiting = workflow.selectCandidate(searched.runId(), "user-1",
+                searched.candidateSet().getFirst().skuId());
+        store.save(new ShoppingAgentState(waiting.runId(), waiting.conversationId(), waiting.userId(),
+                waiting.traceId(), waiting.originalRequest(), waiting.planSpec(),
+                ShoppingAgentState.Phase.CREATING_ORDER, waiting.candidateSet(), waiting.selectedCandidateIndex(),
+                waiting.confirmableSnapshot(), waiting.pendingApproval(),
+                new ShoppingAgentState.ActiveEffect("effect-create", "CREATE_ORDER", "hash",
+                        ShoppingAgentState.EffectStatus.PENDING_EFFECT),
+                0, 0, waiting.planVersion(), null, null, clock.instant()));
+        assertThrows(RunStateConflictException.class, () -> workflow.cancel(waiting.runId(), "user-1"));
+        assertEquals(ShoppingAgentState.Phase.CREATING_ORDER, workflow.get(waiting.runId(), "user-1").phase());
+    }
+
+    @Test
+    void cancelSettledCreatingOrderReleasesReservation() {
+        InMemoryAgentRunStore store = new InMemoryAgentRunStore();
+        InMemoryCommerceEngine commerce = InMemoryCommerceEngine.seeded(clock);
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce,
+                new DeterministicPlanningModel(), store, new InMemoryConversationMemory(), clock);
+        ShoppingAgentState searched = workflow.start("conversation-settled-create", "user-1", "laptop", constraints());
+        ShoppingAgentState waiting = workflow.selectCandidate(searched.runId(), "user-1",
+                searched.candidateSet().getFirst().skuId());
+        int stockBefore = commerce.availableStock(waiting.confirmableSnapshot().reservation().skuId());
+        store.save(new ShoppingAgentState(waiting.runId(), waiting.conversationId(), waiting.userId(),
+                waiting.traceId(), waiting.originalRequest(), waiting.planSpec(),
+                ShoppingAgentState.Phase.CREATING_ORDER, waiting.candidateSet(), waiting.selectedCandidateIndex(),
+                waiting.confirmableSnapshot(), waiting.pendingApproval(),
+                new ShoppingAgentState.ActiveEffect("effect-create", "CREATE_ORDER", "hash",
+                        ShoppingAgentState.EffectStatus.PENDING_EFFECT),
+                0, 0, waiting.planVersion(), null, null, clock.instant()));
+
+        ShoppingAgentState cancelled = workflow.cancel(waiting.runId(), "user-1");
+        assertEquals(ShoppingAgentState.Phase.CANCELLED, cancelled.phase());
+        assertEquals(0, commerce.orderCount());
+        assertEquals(stockBefore + waiting.confirmableSnapshot().reservation().quantity(),
+                commerce.availableStock(waiting.confirmableSnapshot().reservation().skuId()));
+    }
+
+    @Test
+    void cancelRecoversOrderThatBecomesVisibleWhileReservationIsReleased() {
+        InMemoryAgentRunStore store = new InMemoryAgentRunStore();
+        InMemoryCommerceEngine commerce = InMemoryCommerceEngine.seeded(clock);
+        AtomicBoolean hideFirstOrderLookup = new AtomicBoolean(true);
+        CommerceGateway delayedLookup = (CommerceGateway) java.lang.reflect.Proxy.newProxyInstance(
+                CommerceGateway.class.getClassLoader(), new Class<?>[]{CommerceGateway.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals("findOrderBySnapshot")
+                            && hideFirstOrderLookup.compareAndSet(true, false)) {
+                        return Optional.empty();
+                    }
+                    try {
+                        return method.invoke(commerce, arguments);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(delayedLookup,
+                new DeterministicPlanningModel(), store, new InMemoryConversationMemory(), clock);
+        ShoppingAgentState searched = workflow.start("conversation-create-result-unknown", "user-1", "laptop",
+                constraints());
+        ShoppingAgentState waiting = workflow.selectCandidate(searched.runId(), "user-1",
+                searched.candidateSet().getFirst().skuId());
+        ConfirmableOrderSnapshot snapshot = waiting.confirmableSnapshot();
+        ApprovalProof approval = new ApprovalProof(waiting.pendingApproval().approvalRequestId(),
+                snapshot.snapshotId(), snapshot.summaryHash(), "user-1", clock.instant(), snapshot.expiresAt());
+        EffectContext effect = new EffectContext("effect-create-unknown", "effect-create-unknown", waiting.runId(),
+                "create-order", 0, "user-1", waiting.traceId());
+
+        // 模拟 Commerce 已提交订单，Agent 却在保存 COMPLETED 前崩溃。
+        Order created = commerce.createOrder(new CreateOrderCommand("user-1", snapshot.snapshotId(), approval), effect);
+        store.save(new ShoppingAgentState(waiting.runId(), waiting.conversationId(), waiting.userId(),
+                waiting.traceId(), waiting.originalRequest(), waiting.planSpec(),
+                ShoppingAgentState.Phase.CREATING_ORDER, waiting.candidateSet(), waiting.selectedCandidateIndex(),
+                snapshot, waiting.pendingApproval(),
+                new ShoppingAgentState.ActiveEffect(effect.effectId(), "CREATE_ORDER", "hash",
+                        ShoppingAgentState.EffectStatus.PENDING_EFFECT),
+                0, 0, waiting.planVersion(), null, null, clock.instant()));
+
+        // 第一次查询故意看不到订单；释放预占后的二次查询必须恢复真实订单。
+        ShoppingAgentState resolved = workflow.cancel(waiting.runId(), "user-1");
+        assertEquals(ShoppingAgentState.Phase.COMPLETED, resolved.phase());
+        assertNotNull(resolved.finalOrder());
+        assertEquals(created.orderId(), resolved.finalOrder().orderId());
+        assertEquals(ShoppingAgentState.EffectStatus.EFFECT_APPLIED, resolved.activeEffect().status());
+        assertEquals(1, commerce.orderCount());
     }
 
     @Test

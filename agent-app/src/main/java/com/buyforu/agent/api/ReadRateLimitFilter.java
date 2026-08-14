@@ -11,7 +11,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 
-/** 已认证 GET 请求的用户/IP 粗粒度保护；只使用容器解析的 remoteAddr，不信任客户端转发头。 */
+/** 已认证 API 的用户/IP 粗粒度保护：查询走只读桶，地址登记等直写走写入桶。 */
 public final class ReadRateLimitFilter extends OncePerRequestFilter {
     private final RedisAdmissionController admission;
     private final ClientAddressResolver clientAddresses;
@@ -20,20 +20,36 @@ public final class ReadRateLimitFilter extends OncePerRequestFilter {
         this.clientAddresses = clientAddresses;
     }
 
+    private static boolean directWrite(HttpServletRequest request) {
+        return "POST".equals(request.getMethod()) && "/api/v1/addresses".equals(request.getRequestURI());
+    }
+
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                               FilterChain chain) throws ServletException, IOException {
         Authentication authentication = org.springframework.security.core.context.SecurityContextHolder
                 .getContext().getAuthentication();
-        if ("GET".equals(request.getMethod()) && request.getRequestURI().startsWith("/api/")
-                && authentication instanceof JwtAuthenticationToken jwt) {
+        if (authentication instanceof JwtAuthenticationToken jwt) {
+            String userId = jwt.getToken().getSubject();
+            String address = clientAddresses.resolve(request);
             try {
-                admission.admitReadBestEffort(jwt.getToken().getSubject(), clientAddresses.resolve(request));
+                if ("GET".equals(request.getMethod()) && request.getRequestURI().startsWith("/api/")) {
+                    admission.admitReadBestEffort(userId, address);
+                } else if (directWrite(request)) {
+                    // 地址登记不走 CommandService，必须在这里套写入令牌桶。
+                    admission.admit(userId, address, com.buyforu.agent.concurrency.AgentCommand.QueueClass.TRANSACTION);
+                }
             } catch (com.buyforu.agent.concurrency.CommandExceptions.AdmissionRejected rejected) {
                 response.setStatus(429);
                 response.setHeader("Retry-After", Long.toString(rejected.retryAfterSeconds()));
                 response.setContentType("application/problem+json");
                 response.getWriter().write("{\"title\":\"Request was not admitted\",\"status\":429,"
-                        + "\"detail\":\"read rate limit exceeded\"}");
+                        + "\"detail\":\"rate limit exceeded\"}");
+                return;
+            } catch (com.buyforu.agent.concurrency.CommandExceptions.CoordinationUnavailable ignored) {
+                response.setStatus(503);
+                response.setContentType("application/problem+json");
+                response.getWriter().write("{\"title\":\"Traffic coordination unavailable\",\"status\":503,"
+                        + "\"detail\":\"New expensive commands are temporarily unavailable; queries and cancellation remain available.\"}");
                 return;
             }
         }
