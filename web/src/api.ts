@@ -94,6 +94,7 @@ function finishIdempotencySlot(commandId: string, allowNewAttempt: boolean): voi
   const slot = sessionStorage.getItem(commandSlot)
   if (allowNewAttempt && slot) sessionStorage.removeItem(slot)
   sessionStorage.removeItem(commandSlot)
+  sessionStorage.removeItem(`buyforu:last-event:${commandId}`)
   const active = pendingCommand()
   if (active?.commandId === commandId) sessionStorage.removeItem(ACTIVE_COMMAND_KEY)
 }
@@ -188,11 +189,13 @@ export async function followRun(
 
   // fetch 流允许附加 Bearer Token。reader.read() 增加 15 秒软超时：如果开发代理缓冲 SSE，
   // 就关闭该流并切换轮询，不让页面永久堵在一次读取上。
+  const lastEventKey = `buyforu:last-event:${command.commandId}`
+  const lastEventId = sessionStorage.getItem(lastEventKey) ?? '0'
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   try {
     const token = await accessToken()
     const response = await fetch(command.eventUrl, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream', 'Last-Event-ID': '0' },
+      headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream', 'Last-Event-ID': lastEventId },
     })
     if (response.ok && response.body) reader = response.body.getReader()
   } catch {
@@ -220,6 +223,11 @@ export async function followRun(
         buffer = frames.pop() ?? ''
         // 事件内容只用于判断是否属于当前 command，真正状态仍从权威查询接口读取。
         const relevant = frames.some((frame) => {
+          const idLine = frame.split('\n').find((line) => line.startsWith('id:'))
+          if (idLine) {
+            const eventId = idLine.slice(3).trim()
+            if (eventId) sessionStorage.setItem(lastEventKey, eventId)
+          }
           const data = frame.split('\n').filter((line) => line.startsWith('data:'))
             .map((line) => line.slice(5).trim()).join('\n')
           if (!data) return false

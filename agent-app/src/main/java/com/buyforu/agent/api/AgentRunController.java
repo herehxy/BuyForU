@@ -9,8 +9,12 @@ import com.buyforu.agent.concurrency.CommandPayload;
 import com.buyforu.agent.concurrency.CommandService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -59,8 +63,8 @@ public class AgentRunController {
         ConstraintInput supplied = request.constraints();
         ShoppingConstraints secured = new ShoppingConstraints(
                 supplied == null ? null : supplied.query(), supplied == null ? null : supplied.category(),
-                supplied == null ? null : supplied.budgetMax(),
-                supplied == null ? null : supplied.budgetMin(),
+                supplied == null || supplied.budgetMax() == null ? null : supplied.budgetMax().toDomain(),
+                supplied == null || supplied.budgetMin() == null ? null : supplied.budgetMin().toDomain(),
                 supplied == null ? null : supplied.preferredBrands(),
                 supplied == null ? null : supplied.excludedBrands(),
                 supplied == null ? null : supplied.requiredAttributes(),
@@ -161,14 +165,24 @@ public class AgentRunController {
     /** 外部请求模型有明确容量边界；领域模型仍专注表达业务含义，不承载 HTTP 校验注解。 */
     public record ConstraintInput(@Size(max = 500) String query,
                                   @Size(max = 64) String category,
-                                  @Valid Money budgetMax,
-                                  @Valid Money budgetMin,
+                                  @Valid BudgetInput budgetMax,
+                                  @Valid BudgetInput budgetMin,
                                   @Size(max = 20) List<@NotBlank @Size(max = 64) String> preferredBrands,
                                   @Size(max = 20) List<@NotBlank @Size(max = 64) String> excludedBrands,
                                   @Size(max = 20) Map<@NotBlank @Size(max = 64) String,
                                           @NotBlank @Size(max = 128) String> requiredAttributes,
                                   @Min(1) @Max(99) int quantity,
                                   LocalDate deliveryBy) {
+    }
+
+    public record BudgetInput(
+            @NotNull @DecimalMin("0.00") @DecimalMax("99999999.99") @Digits(integer = 8, fraction = 2)
+            java.math.BigDecimal amount,
+            @Size(max = 8) String currency
+    ) {
+        Money toDomain() {
+            return new Money(amount, currency);
+        }
     }
 
     public record SelectionRequest(@NotBlank @Size(max = 128) String skuId) {

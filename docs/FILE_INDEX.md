@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | `pom.xml` | Maven 聚合与版本管理 | 文件内部有 XML 注释 |
 | `docker-compose.yml` | 本地 PostgreSQL、Redis、Keycloak、Ollama | 不启动 Java 和 Web 应用 |
-| `docs/PROJECT_DESIGN.md` | 完整项目设计、实现边界、运行验收与面试问答 | 以当前分支实际代码为准 |
-| `docs/CORRECTNESS_REVIEW_FIXES.md` | 全链路 Review、风险修复和回归说明 | 区分已修复问题与有意不增加的复杂度 |
+| `docs/PROJECT_DESIGN.md` | 总体需求设计、模块边界、完整链路、高并发设计、运行验收与面试问答 | 按大需求组织，基线以当前工作区实际代码为准 |
+| `docs/CORRECTNESS_REVIEW_FIXES.md` | 从初始需求到 Review、Bug 修复和验证的演进记录 | 记录失败场景、不变量、修复方式和明确未实现范围 |
 | `.env.example` | 本地服务端环境变量模板 | 真实 `.env` 被 Git 忽略 |
 | `.gitignore` | 排除密钥、IDE、构建产物 | 规则本身即说明排除对象 |
 | `mvnw` / `mvnw.cmd` | Maven Wrapper 生成脚本 | 第三方生成文件，不手工插入业务注释 |

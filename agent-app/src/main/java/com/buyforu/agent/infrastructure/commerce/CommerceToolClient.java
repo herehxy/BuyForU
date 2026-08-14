@@ -19,4 +19,6 @@ public interface CommerceToolClient {
     void inventoryRelease(String reservationId, EffectContext effect);
 
     Order orderCreate(CreateOrderCommand command, EffectContext effect);
+
+    java.util.Optional<Order> orderFindBySnapshot(String userId, String snapshotId);
 }

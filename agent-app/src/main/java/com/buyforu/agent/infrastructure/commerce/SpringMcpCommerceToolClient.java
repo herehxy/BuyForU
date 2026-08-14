@@ -84,6 +84,17 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
                 "command", arguments(command), "effect", arguments(effect)), Order.class);
     }
 
+    @Override
+    public java.util.Optional<Order> orderFindBySnapshot(String userId, String snapshotId) {
+        OrderLookupResult result = call("commerce_order_find_by_snapshot",
+                Map.of("userId", userId, "snapshotId", snapshotId), OrderLookupResult.class);
+        if (!result.found()) return java.util.Optional.empty();
+        if (result.order() == null) {
+            throw new McpContractException("Commerce MCP order lookup returned found=true without an order");
+        }
+        return java.util.Optional.of(result.order());
+    }
+
     private <T> T call(String toolName, Map<String, Object> arguments, Class<T> resultType) {
         // read tool 没有 EffectContext，仍使用独立的审计 run/trace 标识；写 tool 使用图中的真实标识。
         Map<String, Object> effect = nestedMap(arguments.get("effect"));
@@ -141,6 +152,7 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     private record ReleaseResult(String reservationId, boolean released) { }
     private record AddressList(List<DeliveryAddress> addresses) { }
     private record InventoryList(List<InventoryItem> items) { }
+    private record OrderLookupResult(boolean found, Order order) { }
 
     /** MCP 服务或传输不可用；消息不携带完整请求/响应，避免命令状态接口泄露业务数据。 */
     public static final class McpInfrastructureException extends RuntimeException {

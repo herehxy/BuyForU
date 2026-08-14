@@ -1,5 +1,6 @@
 package com.buyforu.commerce.application;
 
+import com.buyforu.commerce.port.CatalogAttributeNormalizer;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 
@@ -201,6 +202,17 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
             orders.put(order.orderId(), order);
             return order;
         });
+    }
+
+    @Override
+    public synchronized java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        ConfirmableOrderSnapshot snapshot = requireSnapshot(snapshotId);
+        if (!snapshot.userId().equals(userId)) {
+            throw new CommerceException("SNAPSHOT_USER_MISMATCH", "snapshot belongs to another user");
+        }
+        return orders.values().stream()
+                .filter(order -> order.userId().equals(userId) && order.sourceSnapshotId().equals(snapshotId))
+                .findFirst();
     }
 
     public int availableStock(String skuId) {

@@ -1,5 +1,6 @@
 package com.buyforu.agent.concurrency;
 
+import com.buyforu.agent.application.RunExecutionGuard;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,7 +14,7 @@ import java.util.UUID;
  * 每个 run 的跨实例短租约。claim 提交后数据库连接立即归还；epoch 是防止旧 Worker 写回的栅栏令牌。
  */
 @Repository
-public class RunLeaseRepository {
+public class RunLeaseRepository implements RunExecutionGuard {
     private final JdbcTemplate jdbc;
 
     public RunLeaseRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
@@ -122,6 +123,18 @@ public class RunLeaseRepository {
                 UPDATE agent_schema.agent_run_execution SET lease_until=?,updated_at=now()
                 WHERE run_id=? AND active_command_id=? AND execution_epoch=? AND lease_owner=?
                 """, Timestamp.from(leaseUntil), lease.runId(), lease.commandId(), lease.epoch(), lease.owner()) == 1;
+    }
+
+    @Override
+    public boolean hasConflictingLiveLease(String runId) {
+        ExecutionContext current = ExecutionContext.current();
+        UUID currentCommandId = current != null && runId.equals(current.runId()) ? current.commandId() : null;
+        Integer count = jdbc.queryForObject("""
+                SELECT count(*) FROM agent_schema.agent_run_execution
+                WHERE run_id=? AND active_command_id IS NOT NULL AND lease_until>now()
+                  AND (?::uuid IS NULL OR active_command_id<>?::uuid)
+                """, Integer.class, runId, currentCommandId, currentCommandId);
+        return count != null && count > 0;
     }
 
     public boolean isCurrent(String runId, UUID commandId, long epoch) {

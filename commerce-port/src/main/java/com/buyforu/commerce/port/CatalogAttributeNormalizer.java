@@ -1,4 +1,4 @@
-package com.buyforu.commerce.application;
+package com.buyforu.commerce.port;
 
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -7,15 +7,15 @@ import java.util.Set;
 
 /**
  * 把规划模型随口起的规格名收成目录里的键。
- * DeepSeek 常写出 memoryGB=16，商品表存的是 memory=16GB，不归一化就会零结果。
+ * DeepSeek 常写出 memoryGB=16，商品表存的是 memory=16GB，过滤和排序必须用同一套键。
  */
-final class CatalogAttributeNormalizer {
+public final class CatalogAttributeNormalizer {
     private static final Set<String> PLANNING_ONLY = Set.of("type", "category", "品类");
 
     private CatalogAttributeNormalizer() {
     }
 
-    static Map<String, String> skuAttributes(Map<String, String> required) {
+    public static Map<String, String> skuAttributes(Map<String, String> required) {
         if (required == null || required.isEmpty()) return Map.of();
         Map<String, String> sku = new LinkedHashMap<>();
         required.forEach((key, value) -> {
@@ -23,7 +23,7 @@ final class CatalogAttributeNormalizer {
             String canonical = canonicalKey(key);
             String normalized = canonical.equals("memory") || canonical.equals("storage")
                     ? normalizeCapacity(value) : value;
-            if (normalized != null && !normalized.isBlank()) sku.put(canonical, normalized);
+            if (normalized != null && !normalized.isBlank()) sku.put(canonical, value == null ? null : normalized);
         });
         return sku;
     }

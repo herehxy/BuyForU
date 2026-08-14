@@ -1,8 +1,27 @@
 # BuyForU 电商购物 Agent 项目设计与面试指南
 
-> 文档基线：`fix/correctness-and-acceptance` 分支，核心代码提交 `cc96970`  
-> 文档日期：2026-08-13  
+> 文档基线：`fix/correctness-and-acceptance` 分支当前工作区
+> 文档日期：2026-08-14
 > 项目定位：可运行、可恢复、交易边界明确的 Java 电商购物 Agent；不是完整支付与履约平台。
+
+## 0. 需求基线与实现矩阵
+
+本项目的需求经历了三个来源和阶段：
+
+1. 初始产品目标：实现从自然语言购物需求到商品推荐、用户确认和真实订单创建的电商 Agent。
+2. 架构评审目标：吸收 ragent 的 Agent 工程化思路，以及参考项目中固定工作流、RAG、MCP 和 Java 服务化的实践；同时明确 Agent 与交易域的边界。
+3. 中途工程治理目标：补齐高并发入口限流、公平排队、短租约、execution epoch、幂等副作用、下游隔离、SSE 恢复和故障分类。
+
+| 大需求 | 用户可见结果 | 主要实现 | 当前状态 |
+| --- | --- | --- | --- |
+| 自然语言规划与 RAG | 需求被澄清、转换为候选搜索条件 | `SpringAiPlanningModel`、`PlanSpec`、`PlanSpecValidator`、pgvector | 已实现 |
+| 固定 Agent 业务流程 | 搜索、选品、预占、审批、下单按固定状态推进 | `FixedShoppingGraph`、`ShoppingAgentState` | 已实现 |
+| 交易事实与人工确认 | 金额、优惠、库存和履约来自 Commerce；确认快照可校验 | `CommerceGateway`、`ConfirmableOrderSnapshot`、`ApprovalProof` | 已实现 |
+| MCP 服务边界 | Agent 通过 Adapter 调用 Commerce，不绑定 MCP 类型 | `McpCommerceGatewayAdapter`、`CommerceMcpTools` | 已实现 |
+| 异步命令与高并发治理 | 写请求快速返回 202，用户公平调度，LLM 不占数据库连接 | `CommandService`、Redis Lua、`CommandWorker`、短事务租约 | 已实现 |
+| 副作用恢复与取消 | 预占、下单超时或崩溃后不重复交易、不隐藏真实订单 | effect ledger、订单快照查询、幂等释放、execution epoch | 已实现并有回归测试 |
+| 安全与可观测性 | JWT 所有权、服务令牌、稳定错误码、SSE 进度 | Keycloak、Spring Security、requestId、Micrometer | 已实现 |
+| 生产完整电商能力 | 支付、物流、退款、售后 | 不在当前范围 | 未实现，不能对外宣称已具备 |
 
 ## 1. 项目状态结论
 
@@ -24,11 +43,11 @@ BuyForU 已经完成从自然语言购物需求到候选推荐、库存预占、
 
 | 项目 | 结果 | 说明 |
 | --- | --- | --- |
-| Java 21 编译及单元测试 | 通过 | `./mvnw -B clean test`，21 个测试全部通过 |
-| 前端 TypeScript 检查 | 通过 | `npm run typecheck` |
-| 前端生产构建 | 通过 | `npm run build`，80 个模块完成构建 |
-| Testcontainers 集成测试 | 本轮未运行 | 当前 Docker daemon 未启动；仓库内有 6 个 PostgreSQL/pgvector 集成场景 |
-| DeepSeek、MCP、Ollama 全链路 | 本轮未重新调用 | 需要本地基础设施、模型和 API Key；项目不提供规则模型降级 |
+| Java 21 编译及单元测试 | 通过 | `./mvnw clean test`；测试数量以当前构建输出为准 |
+| PostgreSQL/Testcontainers 集成测试 | Docker 可用时已通过；当前环境最近一次命令因 Docker daemon 不可用而跳过 | `./mvnw -Pintegration verify`；覆盖 Commerce 订单/库存、Outbox、Run ownership 和多 Worker 租约 |
+| 前端 TypeScript 检查与生产构建 | 通过 | `npm run typecheck`、`npm run build` |
+| Docker Compose 配置 | 通过 | `docker compose config`；实际启动仍依赖本机 Docker daemon 和环境变量 |
+| DeepSeek、MCP、Ollama 全链路 | 需要运行环境联调 | 需要本地基础设施、模型和 API Key；项目不提供规则模型降级 |
 
 因此，项目当前状态可以概括为：**核心设计和代码闭环已经成立，基础构建通过；外部依赖联调与容器集成测试需要在 Docker 和 DeepSeek 可用时再执行一次最终验收。**
 
@@ -527,7 +546,10 @@ Java 21 虚拟线程降低阻塞式 SDK 的线程成本，但虚拟线程不代�
 - heartbeat 发现后取消当前下游 Future，并中断 Worker。
 - 在下一个安全点终止流程。
 - 已预占但未下单时幂等释放库存。
-- 已经创建订单时，Agent 不会伪造回滚，而是返回领域冲突。
+- `CREATING_ORDER` 取消前先排除当前 CONTROL 命令自己的租约，再按 `snapshotId` 查询 Commerce 是否已经创建订单。
+- 已经创建订单时，Agent 恢复为 `COMPLETED`，不会伪造回滚或把订单隐藏成 `CANCELLED`。
+- 首次查询无订单后，系统会幂等释放预占并再次查询；利用 Commerce 对预占行的锁竞争，避免旧下单请求在竞态窗口内被错误标记为取消。
+- Commerce 明确没有订单后，才将仍为 ACTIVE 的预占释放并标记 `CANCELLED`。
 
 ## 16. RAG 与记忆
 
@@ -555,7 +577,7 @@ Java 21 虚拟线程降低阻塞式 SDK 的线程成本，但虚拟线程不代�
 
 ## 17. MCP 设计
 
-Commerce MCP Server 暴露 7 个结构化工具：
+Commerce MCP Server 暴露 8 个结构化工具：
 
 | Tool | 类型 | 说明 |
 | --- | --- | --- |
@@ -566,6 +588,7 @@ Commerce MCP Server 暴露 7 个结构化工具：
 | `commerce_confirmable_order_prepare` | 写 | 报价、预占并生成快照 |
 | `commerce_inventory_release` | 写 | 幂等释放预占 |
 | `commerce_order_create` | 写 | 使用审批证明创建订单 |
+| `commerce_order_find_by_snapshot` | 读 | 按确认快照解析已创建订单，不产生副作用 |
 
 MCP Tool 自动回调对 LLM 关闭。也就是说，DeepSeek 不能自行决定调用写 Tool；只有固定图的 Java 节点可以通过 `CommerceGateway` 发起交易调用。
 
@@ -964,7 +987,7 @@ API 命令幂等避免重复命令；effect ledger 避免重复副作用；`orde
 
 **参考答案：**
 
-订单已经由 Commerce 事务提交，不能回滚。Agent 恢复 CREATING_ORDER 状态后使用相同 effectId 重放 createOrder，Commerce 从 effect ledger 或 source_snapshot 唯一记录返回原订单，然后 Agent 再保存 COMPLETED。
+订单已经由 Commerce 事务提交，不能回滚。批准命令恢复时使用相同 effectId 重放 `createOrder`，Commerce 从 effect ledger 或 source_snapshot 唯一记录返回原订单，然后 Agent 再保存 COMPLETED；用户取消时不重放下单，而是调用 `findOrderBySnapshot` 查询已有订单，避免取消动作产生新订单。
 
 ### Q19：为什么订单和 Outbox 必须同事务？
 
@@ -1111,4 +1134,3 @@ Commerce 不是公开用户入口，只接受 Agent 服务调用。内部服务�
 - Redis 丢失后为什么不会丢任务。
 - 租约、epoch、state version 分别解决什么问题。
 - 为什么 20 路 LLM 并发不需要 20 个数据库连接。
-

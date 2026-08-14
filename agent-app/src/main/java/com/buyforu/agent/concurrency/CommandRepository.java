@@ -157,6 +157,17 @@ public class CommandRepository {
                 """, code, commandId);
     }
 
+    public List<AgentCommand> recentlyRecovered(int withinSeconds) {
+        return jdbc.query("""
+                SELECT * FROM agent_schema.agent_command
+                WHERE error_code IN ('WORKER_LEASE_EXPIRED','ORPHAN_RUNNING_COMMAND','COMMAND_RECOVERY_EXHAUSTED')
+                  AND (
+                    (status='RETRY_WAIT' AND available_at>=now() - (? * interval '1 second'))
+                    OR (status IN ('EXPIRED','FAILED') AND completed_at>=now() - (? * interval '1 second'))
+                  )
+                """, (rs, row) -> map(rs), withinSeconds, withinSeconds);
+    }
+
     public void retryLater(UUID commandId, Instant availableAt, String code, String detail) {
         jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='RETRY_WAIT',available_at=?,error_code=?,error_detail=?

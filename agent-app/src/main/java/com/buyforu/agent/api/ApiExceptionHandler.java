@@ -2,6 +2,7 @@ package com.buyforu.agent.api;
 
 import com.buyforu.commerce.port.CommerceOperationException;
 import com.buyforu.agent.application.RunStateConflictException;
+import com.buyforu.agent.infrastructure.commerce.SpringMcpCommerceToolClient;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.slf4j.Logger;
@@ -27,7 +28,7 @@ public class ApiExceptionHandler {
     ProblemDetail commerceFailure(CommerceOperationException exception) {
         HttpStatus status = switch (exception.code()) {
             case "ADDRESS_USER_MISMATCH", "RESERVATION_USER_MISMATCH", "APPROVAL_USER_MISMATCH",
-                 "EFFECT_USER_MISMATCH" ->
+                 "EFFECT_USER_MISMATCH", "SNAPSHOT_USER_MISMATCH" ->
                     HttpStatus.FORBIDDEN;
             case "SKU_NOT_FOUND", "RESERVATION_NOT_FOUND", "SNAPSHOT_NOT_FOUND",
                  "DELIVERY_ZONE_NOT_FOUND" -> HttpStatus.NOT_FOUND;
@@ -37,8 +38,31 @@ public class ApiExceptionHandler {
         };
         ProblemDetail detail = ProblemDetail.forStatus(status);
         detail.setTitle("Commerce operation rejected");
-        detail.setDetail(exception.getMessage());
+        detail.setDetail(publicCommerceDetail(exception.code()));
         detail.setProperty("code", exception.code());
+        addRequestId(detail);
+        log.debug("Commerce operation rejected [{}]: {}", exception.code(), exception.getMessage());
+        return detail;
+    }
+
+    @ExceptionHandler(SpringMcpCommerceToolClient.McpContractException.class)
+    ProblemDetail mcpContract(SpringMcpCommerceToolClient.McpContractException exception) {
+        log.debug("Commerce MCP contract mismatch: {}", exception.getMessage());
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        detail.setTitle("Commerce contract mismatch");
+        detail.setDetail("Agent 与交易服务版本不兼容，请联系维护人员");
+        detail.setProperty("code", "MCP_CONTRACT_MISMATCH");
+        addRequestId(detail);
+        return detail;
+    }
+
+    @ExceptionHandler(SpringMcpCommerceToolClient.McpInfrastructureException.class)
+    ProblemDetail mcpInfrastructure(SpringMcpCommerceToolClient.McpInfrastructureException exception) {
+        log.warn("Commerce MCP unavailable: {}", exception.getMessage());
+        ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        detail.setTitle("Commerce unavailable");
+        detail.setDetail("交易服务暂时不可用，请稍后重试");
+        detail.setProperty("code", "COMMERCE_UNAVAILABLE");
         addRequestId(detail);
         return detail;
     }
@@ -47,8 +71,9 @@ public class ApiExceptionHandler {
     ProblemDetail invalidRequest(IllegalArgumentException exception) {
         ProblemDetail detail = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
         detail.setTitle("Invalid request");
-        detail.setDetail(exception.getMessage());
+        detail.setDetail(publicArgumentDetail(exception.getMessage()));
         addRequestId(detail);
+        log.debug("Invalid request: {}", exception.getMessage());
         return detail;
     }
 
@@ -114,6 +139,27 @@ public class ApiExceptionHandler {
         detail.setDetail("The request could not be completed. Use the server trace for diagnostics.");
         addRequestId(detail);
         return detail;
+    }
+
+    private static String publicCommerceDetail(String code) {
+        return switch (code) {
+            case "OUT_OF_STOCK" -> "商品库存不足，请重新选择";
+            case "BUDGET_EXCEEDED", "BUDGET_BELOW_MINIMUM" -> "当前应付金额不符合已确认预算";
+            case "ADDRESS_USER_MISMATCH", "RESERVATION_USER_MISMATCH", "APPROVAL_USER_MISMATCH",
+                 "EFFECT_USER_MISMATCH", "SNAPSHOT_USER_MISMATCH" -> "无权操作该资源";
+            case "SKU_NOT_FOUND", "RESERVATION_NOT_FOUND", "SNAPSHOT_NOT_FOUND",
+                 "DELIVERY_ZONE_NOT_FOUND" -> "请求的交易资源不存在";
+            case "RESERVATION_NOT_ACTIVE", "SNAPSHOT_EXPIRED", "APPROVAL_EXPIRED" -> "确认快照或预占已失效，请重新报价";
+            default -> "交易请求被拒绝";
+        };
+    }
+
+    private static String publicArgumentDetail(String message) {
+        if (message == null || message.isBlank() || message.length() > 180 || message.contains("\n")
+                || message.contains("Exception") || message.contains("/") || message.contains("\\")) {
+            return "Request is invalid.";
+        }
+        return message;
     }
 
     private static void addRequestId(ProblemDetail detail) {

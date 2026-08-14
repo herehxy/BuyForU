@@ -2,11 +2,7 @@ package com.buyforu.commerce.it;
 
 import com.buyforu.commerce.application.CommerceException;
 import com.buyforu.commerce.application.JdbcCommerceEngine;
-import com.buyforu.commerce.port.model.CommerceModels.EffectContext;
-import com.buyforu.commerce.port.model.CommerceModels.Money;
-import com.buyforu.commerce.port.model.CommerceModels.PrepareOrderRequest;
-import com.buyforu.commerce.port.model.CommerceModels.ProductCandidate;
-import com.buyforu.commerce.port.model.CommerceModels.SearchRequest;
+import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -56,6 +52,22 @@ class BudgetSnapshotIT {
                         Money.cny("6200"), null, List.of(), java.util.Map.of(), address("u-1"), null, 1, 10))
                 .candidates().stream().map(ProductCandidate::skuId).toList();
         assertTrue(skuIds.contains("sku-max-32"));
+    }
+
+    @Test
+    void createdOrderCanBeResolvedByAuthoritativeSnapshot() {
+        String userId = "order-lookup-user";
+        String addressId = address(userId);
+        ConfirmableOrderSnapshot snapshot = engine.prepareConfirmableOrder(
+                new PrepareOrderRequest(userId, "sku-air-16", 1, addressId, Money.cny("5000")),
+                effect("lookup-prepare", userId));
+        ApprovalProof approval = new ApprovalProof("lookup-approval", snapshot.snapshotId(), snapshot.summaryHash(),
+                userId, java.time.Instant.now(), snapshot.expiresAt());
+        Order created = engine.createOrder(new CreateOrderCommand(userId, snapshot.snapshotId(), approval),
+                effect("lookup-create", userId));
+
+        assertEquals(created.orderId(), engine.findOrderBySnapshot(userId, snapshot.snapshotId())
+                .orElseThrow().orderId());
     }
 
     private String address(String userId) {
