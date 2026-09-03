@@ -88,18 +88,19 @@ public class CommandWorker {
     /** 续租使用独立短事务，绝不和正在进行的网络调用共享连接。 */
     @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}", scheduler = "leaseScheduler")
     void heartbeat() {
-        Instant staleBefore = Instant.now().minusSeconds(90);
+        Instant now = Instant.now();
         activeLeases.forEach((commandId, lease) -> {
             boolean cancelRequested = leases.cancellationRequested(lease);
-            Instant startedAt = commands.find(commandId).map(AgentCommand::startedAt).orElse(null);
-            if (cancelRequested || !shouldRenewLease(startedAt, staleBefore)) {
+            // 判据是命令期限而非已运行时长：PLANNING 允许 210 秒，慢模型响应与三级 Replan 必须能跑满该期限。
+            Instant deadlineAt = commands.find(commandId).map(AgentCommand::deadlineAt).orElse(null);
+            if (cancelRequested || !shouldRenewLease(deadlineAt, now)) {
                 inFlight.cancel(commandId);
                 Thread worker = activeThreads.get(commandId);
                 if (worker != null) worker.interrupt();
-                // 取消或卡住后不能再续租，否则 recoverExpired 永远看不到这条 RUNNING。
+                // 取消或期限届满后不能再续租，否则 recoverExpired 永远看不到这条 RUNNING。
                 return;
             }
-            if (!leases.heartbeat(lease, Instant.now().plus(properties.leaseDuration()))) {
+            if (!leases.heartbeat(lease, now.plus(properties.leaseDuration()))) {
                 activeLeases.remove(commandId);
             }
         });
@@ -195,6 +196,22 @@ public class CommandWorker {
                 events.append(command.runId(), command.commandId(), "command.failed",
                         Map.of("code", classify(transientFailure)));
             }
+        } catch (DependencyExecutor.DependencyInterruptedException interrupted) {
+            // 必须排在 catch (RuntimeException) 之前，否则这个子类永远落不进来。
+            // heartbeat 在"用户取消"和"期限届满"两种情况下都会 interrupt，此处把两者分开，
+            // 否则都落成通用的 COMMAND_EXECUTION_FAILED，运维无法识别命令是被终止还是真的出错。
+            if (lease != null && leases.cancellationRequested(lease)) {
+                commands.markCancelled(command.commandId(), "RUN_CANCEL_REQUESTED");
+                events.append(command.runId(), command.commandId(), "command.cancelled",
+                        Map.of("code", "RUN_CANCEL_REQUESTED"));
+            } else {
+                commands.markFailed(command.commandId(), "COMMAND_DEADLINE_EXCEEDED", safeMessage(interrupted));
+                meters.counter("buyforu_command_deadline_terminated_total",
+                        "queue_class", command.queueClass().name()).increment();
+                events.append(command.runId(), command.commandId(), "command.failed",
+                        Map.of("code", "COMMAND_DEADLINE_EXCEEDED"));
+                log.warn("Command {} exceeded its deadline and was terminated", command.commandId());
+            }
         } catch (RuntimeException failure) {
             commands.markFailed(command.commandId(), classify(failure), safeMessage(failure));
             events.append(command.runId(), command.commandId(), "command.failed",
@@ -234,8 +251,13 @@ public class CommandWorker {
         };
     }
 
-    static boolean shouldRenewLease(Instant startedAt, Instant staleBefore) {
-        return startedAt == null || !startedAt.isBefore(staleBefore);
+    /**
+     * 续租的唯一判据是命令是否仍在期限内，而不是已经运行了多久。
+     * 已运行时长不构成终止理由：PLANNING 命令期限为 210 秒，慢模型响应与三级 Replan 必须能跑满该期限。
+     * 历史上这里用 startedAt 加 90 秒硬阈值，会把所有超过 90 秒的合法规划任务判死。
+     */
+    static boolean shouldRenewLease(Instant deadlineAt, Instant now) {
+        return deadlineAt == null || deadlineAt.isAfter(now);
     }
 
     static String classify(Throwable failure) {
@@ -244,6 +266,9 @@ public class CommandWorker {
         if (causeNameContains(failure, "McpContract")) return "MCP_CONTRACT_MISMATCH";
         if (causeNameContains(failure, "McpInfrastructure")) return "COMMERCE_UNAVAILABLE";
         if (causeNameContains(failure, "CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
+        // 中断判定必须早于 Timeout：DependencyInterruptedException 语义是"被终止"，
+        // 若先判 Timeout 会把期限届满终止误报成外部服务超时。
+        if (causeNameContains(failure, "DependencyInterrupted")) return "COMMAND_DEADLINE_EXCEEDED";
         if (causeNameContains(failure, "Timeout")) return "DEPENDENCY_TIMEOUT";
         return "COMMAND_EXECUTION_FAILED";
     }
@@ -257,6 +282,7 @@ public class CommandWorker {
             case "DEPENDENCY_CIRCUIT_OPEN", "COMMERCE_UNAVAILABLE" -> "交易服务暂时不可用，请稍后重试";
             case "MCP_CONTRACT_MISMATCH" -> "Agent 与交易服务版本不兼容，请联系维护人员";
             case "STALE_EXECUTION" -> "任务已由更新的执行实例接管";
+            case "COMMAND_DEADLINE_EXCEEDED" -> "任务处理超时，请稍后重试";
             default -> "任务执行失败，请使用错误码和 requestId 排查";
         };
     }

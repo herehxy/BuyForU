@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BuyForU 代码 Review 报告（接续）</title>
+<style>
+  :root { --bg:#f7f8fa; --surface:#fff; --border:#e4e7ec; --text:#1f2329; --muted:#646a73;
+          --accent:#2563eb; --ok:#16a34a; --warn:#d97706; --high:#dc2626; --code:#f3f4f6; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; line-height:1.7; padding:32px 16px; }
+  .container { max-width:980px; margin:0 auto; }
+  header { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px 32px; margin-bottom:24px; }
+  h1 { font-size:24px; margin-bottom:8px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; vertical-align:middle; }
+  .badge.ok { background:#ecfdf5; color:var(--ok); } .badge.warn { background:#fffbeb; color:var(--warn); }
+  section { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 28px; margin-bottom:20px; }
+  h2 { font-size:18px; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid var(--border); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { background:#fafbfc; font-weight:600; white-space:nowrap; }
+  code { background:var(--code); border-radius:4px; padding:1px 6px; font-size:13px; font-family:"SF Mono",Menlo,monospace; }
+  pre { background:var(--code); border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; font-family:"SF Mono",Menlo,monospace; line-height:1.6; }
+  ul,ol { padding-left:22px; margin:8px 0; } li { margin:4px 0; }
+  .sev { display:inline-block; padding:1px 8px; border-radius:4px; font-size:12px; font-weight:700; }
+  .sev-p1 { background:#fee2e2; color:var(--high); } .sev-p2 { background:#fef3c7; color:var(--warn); } .sev-p3 { background:#e0e7ff; color:var(--accent); }
+  .note { background:#eff6ff; border-left:4px solid var(--accent); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  footer { color:var(--muted); font-size:12px; text-align:center; margin-top:24px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>BuyForU 代码 Review 报告（接续） <span class="badge ok">43 测试通过</span></h1>
+  <div class="meta">生成：2026-08-25 ｜ 仓库：<code>github.com/herehxy/BuyForU</code> ｜ 分支：<code>fix/correctness-and-acceptance</code>（工作区干净）｜ 接续 xdudu 会话（因 25 轮上限中断）</div>
+</header>
+
+<section>
+  <h2>1. 结论摘要</h2>
+  <p>本项目代码质量高，文档驱动（<code>CORRECTNESS_REVIEW_FIXES.md</code> 记录 14 个已关闭问题 + 2 个取消 Bug 的修复），本次抽查<strong>验证了文档声称的核心不变量与代码实现一致</strong>：effect ledger 幂等、行锁防超卖、订单与 Outbox 同事务、epoch fencing、双层订单查询的取消竞态均实现严谨。</p>
+  <p>本次接续审查（原 xdudu 会话中断在并发治理与 MCP 客户端）发现 <strong>1 个 P2 级边界一致性问题</strong>（heartbeat 90 秒硬阈值与 PLANNING 命令 210 秒期限矛盾）和若干低优先观察项，无 P1 级缺陷。单元测试 43 个全部通过。</p>
+</section>
+
+<section>
+  <h2>2. 审查范围与方法</h2>
+  <p>原 xdudu 会话已审查：Commerce 引擎、Agent 工作流、安全配置、前端；中断于"并发治理核心与 MCP 客户端"。本次接续覆盖：</p>
+  <table>
+    <tr><th>模块</th><th>文件</th><th>结论</th></tr>
+    <tr><td>公平队列</td><td><code>RedisFairQueue.java</code></td><td>用户级等权轮转、用户内 FIFO、Lua 原子性，已审</td></tr>
+    <tr><td>命令消费</td><td><code>CommandWorker.java</code></td><td>租约、恢复、重试、错误分类，发现 1 个 P2（见 §4）</td></tr>
+    <tr><td>命令准入</td><td><code>CommandService.java</code></td><td>幂等键 + requestHash + 唯一索引 + FAILED/EXPIRED 强制换 key，严谨</td></tr>
+    <tr><td>限流</td><td><code>RedisAdmissionController.java</code></td><td>Token Bucket Lua + 熔断 fail-closed + 查询故障放行，严谨</td></tr>
+    <tr><td>租约/fencing</td><td><code>RunLeaseRepository.java</code></td><td>epoch 栅栏、孤儿恢复、冲突租约排除当前命令，严谨</td></tr>
+    <tr><td>MCP 客户端</td><td><code>McpClientConfiguration / SpringMcpCommerceToolClient / McpCommerceGatewayAdapter</code></td><td>服务令牌注入不泄漏、错误三级分类、原始数据不入审计，严谨</td></tr>
+    <tr><td>Commerce 引擎</td><td><code>JdbcCommerceEngine.java</code></td><td>effect ledger + advisory lock、行锁、Outbox 同事务，抽查一致</td></tr>
+    <tr><td>取消竞态</td><td><code>ShoppingWorkflowService.cancel</code></td><td>双层订单查询 + 释放后再查，与文档 Bug2 修复一致</td></tr>
+    <tr><td>SQL 约束</td><td>迁移脚本</td><td><code>UNIQUE(user_id,run_id,idempotency_key)</code>、<code>source_snapshot_id UNIQUE</code>、effect 幂等唯一索引</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>3. 正确性验证（文档基线对照）</h2>
+  <table>
+    <tr><th>文档声明的不变量</th><th>代码证据</th><th>结论</th></tr>
+    <tr><td>同一幂等键并发提交不重复下单</td><td>advisory lock + <code>effect_record(idempotency_key) UNIQUE</code> + agent_command 唯一索引 + 数据库竞态 replay</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>快照过期不复用旧 effectId</td><td>释放旧预占 → 递增 planVersion → 新 prepare effect（approve 内 requote 分支）</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>并发预占不超卖</td><td><code>SELECT ... FOR UPDATE</code> 串行化同 SKU，检查与扣减同事务</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>订单与事件不丢</td><td>orders 与 outbox_event 同一事务写入</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>旧 Worker 不覆盖新状态</td><td>execution_epoch 递增 + heartbeat/写回校验 epoch+owner</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>取消不误伤正在下单</td><td>hasConflictingLiveLease 排除当前 CONTROL 命令</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>CREATING_ORDER 取消不产生"有订单显示取消"</td><td>findOrderBySnapshot → 释放 → 二次查询，Commerce 无订单才 CANCELLED</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>MCP 错误分类进入熔断统计</td><td>validate 在 DependencyExecutor 保护的 Callable 内：领域拒绝 / Schema 契约 / 基础设施三类</td><td><span class="sev sev-p3">一致</span></td></tr>
+    <tr><td>MCP Schema 原文不返回浏览器</td><td>McpContractException 继承 IllegalArgumentException，API 用固定公开文案</td><td><span class="sev sev-p3">一致</span></td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>4. 新发现问题</h2>
+
+  <h3><span class="sev sev-p2">P2</span> heartbeat 90 秒硬阈值与 PLANNING 命令期限（210s）不一致</h3>
+  <p><strong>位置：</strong><code>CommandWorker.java</code> 91–105（heartbeat）与 237–239（shouldRenewLease）；期限定义见 <code>CommandService.java</code> 52–56（PLANNING 210s / TRANSACTION 50s / CONTROL 15s）。</p>
+  <p><strong>行为：</strong>心跳每 10 秒检查一次：<code>staleBefore = now - 90s</code>，而 <code>shouldRenewLease</code> 用命令<strong>首次开始时间</strong>（<code>started_at</code> 在首次 claim 时写入，<code>COALESCE(started_at, now())</code>）判断——命令从开始算超过 90 秒，即使仍在正常执行（DeepSeek 规划、多次重规划），也会被 <code>inFlight.cancel + worker.interrupt()</code> 强制中断。</p>
+  <p><strong>影响：</strong>PLANNING 命令允许 210 秒，但 90 秒即被中断。TRANSACTION（50s）、CONTROL（15s）不受影响。慢模型或三级 Replan 场景下，规划命令会在 90–210 秒窗口内被误杀；中断后命令进入失败/恢复路径（attempts 递增），极端情况在 3 次尝试后 EXPIRED，而本可成功的规划无法完成。</p>
+  <p><strong>证据：</strong><code>CommandWorkerTest</code> 仅固定了"startedAt 早于 90s 返回 false"的单测，未覆盖"90–210s 合法规划窗口"。</p>
+  <p><strong>建议：</strong>卡住判定不应使用首次开始时间，应改为①命令期限 <code>deadlineAt</code>（到期才停止续租并取消），或②lease 最后心跳时间（与 <code>recoverExpired</code> 的陈旧语义对齐）；90 秒硬编码改为配置项。需要补充"运行超过 90 秒仍在进展的命令不被中断"的集成测试。</p>
+
+  <h3><span class="sev sev-p3">P3</span> 观察项</h3>
+  <ul>
+    <li><strong>用户锁 TTL 240s 无心跳续期</strong>（<code>RedisFairQueue.tryAcquireUser</code>）：注释明确"崩溃后最多堵 240 秒"。命令期限（≤210s）均小于 TTL，正常路径安全；仅当 recoverExpired 后 releaseUser 因 Redis 短暂故障失败时，该用户会被堵至 TTL 自然过期。属已知边界，建议在指标中暴露该等待时长以便观测。</li>
+    <li><strong>MCP 写调用超时 5s / 重试 2 次</strong>（<code>SpringMcpCommerceToolClient.call</code>）：Commerce 下单事务若超过 5 秒，Agent 侧会超时重试——安全性由 effect 幂等兜底（同 effectId 重放返回原结果），正确性无问题；长尾延迟场景可评估是否将写超时放宽到命令期限（50s）内与事务上限对齐。</li>
+    <li><strong>CONTROL lane 在 Redis 故障时放行</strong>（<code>RedisAdmissionController.admit</code>）：有意设计（取消/拒绝必须可用），与"写路径 fail-closed"并存是合理的分级降级。</li>
+    <li><strong>队列重建</strong>（<code>reconcileRedisIndex</code>）：已确认只取 <code>QUEUED/RETRY_WAIT</code>，不会把已完成命令重新入队，无风险。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>5. 架构与工程优点</h2>
+  <ul>
+    <li><strong>交易事实与 LLM 严格隔离</strong>：LLM 只生成 PlanSpec，LangGraph4j 固定图执行；Commerce 经纯 Java 端口 + MCP 仅作 Adapter，防止模型污染交易边界。</li>
+    <li><strong>幂等是系统性设计而非补丁</strong>：命令级（idempotency_key + requestHash + 唯一索引）、Effect 级（effect ledger + advisory lock）、资源级（source_snapshot_id 唯一）三层幂等，覆盖网络超时、进程崩溃、并发重放全部窗口。</li>
+    <li><strong>fencing 完整</strong>：epoch + stateVersion + lease_owner 条件更新，旧 Worker 的写回被栅栏拒绝并显式标记 STALE_EXECUTION。</li>
+    <li><strong>故障分级降级</strong>：Redis 协调层 fail-closed（写）/ 放行（读与 CONTROL），CircuitBreaker 保护协调依赖；错误分类沿 cause chain，对外固定公开文案，不泄漏 MCP 细节。</li>
+    <li><strong>热路径局部化</strong>：下单只回收当前 SKU 过期预占（避免全表锁），后台批量回收用 SKIP LOCKED；搜索批量加载促销规则消除 N+1。</li>
+    <li><strong>测试即文档</strong>：每个测试类顶部注明验证的风险点，故障注入位置说明崩溃窗口；测试命名与不变量一一对应。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>6. 验证矩阵</h2>
+  <table>
+    <tr><th>项</th><th>结果</th></tr>
+    <tr><td><code>./mvnw test</code>（commerce 13 + agent 30）</td><td>43 通过 / 0 失败 / BUILD SUCCESS</td></tr>
+    <tr><td>Git 状态</td><td>工作区干净，分支 <code>fix/correctness-and-acceptance</code> 与 origin 同步</td></tr>
+    <tr><td>故障注入测试</td><td>GraphShoppingWorkflowTest 覆盖"requote 翻转后崩溃"等窗口，通过</td></tr>
+    <tr><td>集成测试（<code>-Pintegration</code>）</td><td>需 Docker，未在本机执行（文档标注）</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>7. 建议（按优先级）</h2>
+  <ol>
+    <li>修复 §4 的 P2（heartbeat 判定改用 deadlineAt/最后心跳时间），并补充"90–210s 正常规划不被中断"的集成测试。</li>
+    <li>将 90s 阈值配置化，纳入 <code>ConcurrencyProperties</code>，避免后续期限调整时再次失配。</li>
+    <li>为用户锁等待时长与命令中断次数补充指标（已有 lease_recovered_total，可加 <code>buyforu_command_interrupted_total</code>），便于线上观测。</li>
+    <li>若生产预期 MCP 写超时接近事务上限，评估将写超时与 TRANSACTION 命令期限（50s）对齐。</li>
+  </ol>
+  <div class="note">本报告为临时审查产物（未纳入版本控制）。P2 修复建议先写失败场景与不变量，再改代码与测试，符合项目维护规则。</div>
+</section>
+
+<footer>BuyForU 代码 Review（接续） ｜ 由 WorkBuddy 生成 ｜ 基于 docs/CORRECTNESS_REVIEW_FIXES.md 基线对照</footer>
+</div>
+</body>
+</html>

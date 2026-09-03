@@ -106,6 +106,7 @@ Review 不只检查正常路径，还模拟了：
 | `Last-Event-ID` 固定为 0 | 重连不能继续上次游标 | 浏览器按 command 保存并提交事件 ID；完成后清理 |
 | HTTP DTO 无边界 | 超大集合和未知字段可以进入业务 | 独立 HTTP 输入模型、长度/数量限制、放宽字段白名单 |
 | Flyway 集成测试冲突 | Agent 扫描到 Commerce 的同版本迁移 | Agent 测试固定使用自身 migration 目录 |
+| 长时间规划命令被 90 秒硬阈值误杀 | heartbeat 用命令“首次开始时间”判定卡住，与 PLANNING 期限 210 秒矛盾 | 续租判据改为命令期限 `deadlineAt`；中断结果区分“用户取消”与“期限届满”（见 3.3） |
 
 ### 3.2 本次重点修复的两个取消 Bug
 
@@ -141,6 +142,65 @@ Review 不只检查正常路径，还模拟了：
 - `BudgetSnapshotIT.createdOrderCanBeResolvedByAuthoritativeSnapshot`
 
 这条路径不会重放 `createOrder`，因此取消本身不会补建新订单。
+
+### 3.3 Bug 3：heartbeat 用已运行时长判定卡住，确定性误杀长时间规划命令
+
+#### 失败场景
+
+1. 用户提交 PLANNING 命令，`deadlineAt = now + 210s`（`CommandService` 按 lane 定义）。
+2. DeepSeek 响应慢或触发三级 Replan，命令持续运行。
+3. `t = 90s`：`heartbeat()` 用 `now - 90s` 作为陈旧阈值，因 `startedAt` 早于该阈值判定“卡住”。
+4. 停止续租并 `worker.interrupt()`；worker 阻塞在 `DependencyExecutor.future.get()`，抛 `InterruptedException`，被包装为 `DependencyInterruptedException`。
+5. 该类型不在 `execute()` 的可重试分支内（只列了 `DependencyTimeoutException`、`CallNotPermittedException`、`BulkheadFullException`），落入 `catch (RuntimeException)`。
+6. 命令被 `markFailed('COMMAND_EXECUTION_FAILED')`，`attempts` 不递增、不重试。
+
+**性质是确定性失败而非偶发故障**：任务需求超过 90 秒时，重试多少次都在同一位置被杀。
+
+#### 根因：全系统唯一的语义偏离
+
+| 位置 | 陈活性判据 |
+| --- | --- |
+| `RunLeaseRepository.recoverExpired()` | `lease_until <= now()` |
+| `RunLeaseRepository.hasConflictingLiveLease()` | `lease_until > now()` |
+| `RunLeaseRepository.isCurrent()` | `lease_until > now()` |
+| `CommandWorker.heartbeat()`（修复前） | **`startedAt < now - 90s`** |
+
+前三处统一以 `lease_until` 为准，只有 heartbeat 用第二套时间判据。
+
+#### 当前修复
+
+1. `shouldRenewLease` 签名与语义重定义为 `(Instant deadlineAt, Instant now)`：只有命令仍在期限内才续租，已运行时长不构成终止理由。
+2. `heartbeat()` 删除 `minusSeconds(90)` 魔法数字，判据改为 `deadlineAt`。该参数无需新增配置——期限已由 `CommandService` 按 lane 定义为 PLANNING 210s / TRANSACTION 50s / CONTROL 15s。
+3. `execute()` 在 `catch (RuntimeException)` **之前**新增 `DependencyInterruptedException` 分支，按 `cancellationRequested` 区分终止原因：用户取消 → `markCancelled('RUN_CANCEL_REQUESTED')`；期限届满 → `markFailed('COMMAND_DEADLINE_EXCEEDED')` 并累加 `buyforu_command_deadline_terminated_total`。
+4. `classify` 新增 `DependencyInterrupted` 判定且**排在 `Timeout` 之前**，避免把“被终止”误报成“外部服务超时”。
+5. `safeMessage` 补充 `COMMAND_DEADLINE_EXCEEDED` 公开文案。
+
+#### 两个易错点（记录以备后续维护）
+
+- `catch` 顺序：`DependencyInterruptedException` 是 `RuntimeException` 子类，分支必须排在通用分支之前，否则永远落不进来——这正是该缺陷能静默存在的原因。
+- 不能用 `markExpired()` 终止 RUNNING 命令：其 SQL 限定 `status IN ('QUEUED','RETRY_WAIT')`，对 `RUNNING` 状态会静默漏更新（`jdbc.update` 影响 0 行且不报错）。
+
+#### 不变量
+
+- I1：未超过 `deadlineAt` 就必须续租，不论已运行多久。
+- I2：停止续租的唯一理由是 `cancel_requested=true` 或 `deadlineAt <= now`。
+- I3：全系统陈活性判定统一以 `lease_until` / `deadlineAt` 为准，不存在第二套判据。
+- I4：期限与容量参数均可配置，代码中无裸魔法数字。
+- I5：被中断的命令可归类为 `CANCELLED` / `EXPIRED` / `FAILED` 之一，且指标可区分。
+
+#### 对应测试
+
+- `CommandWorkerTest.LeaseRenewal.renewsEvenAfterRunningBeyondNinetySeconds`（核心回归锁：运行 180 秒但期限未到仍需续租）
+- `CommandWorkerTest.LeaseRenewal.renewsWhenDeadlineMatchesFullPlanningWindow`（209 秒边界）
+- `CommandWorkerTest.LeaseRenewal.stopsRenewingOnceDeadlinePassed` / `stopsRenewingExactlyAtDeadline`
+- `CommandWorkerTest.FailureClassification.interruptedCallIsClassifiedAsDeadlineExceeded`
+- `CommandWorkerTest.FailureClassification.timeoutIsStillClassifiedAsDependencyTimeout`（防止新规则抢走既有分类）
+
+原有 `staleOrMissingStartTimeControlsLeaseRenewal` 断言把缺陷行为固化为预期，已随本次修复重写。
+
+#### 已知取舍
+
+假死线程（例如死循环）会占用租约至期限届满，PLANNING 最长 210 秒。这是有界上界，且崩溃实例仍由 `recoverExpired()` 兜底，因此可接受。若未来需要提前识别假死，可在业务图节点推进时记录进展时间（方案 C），但需扩大改动面，本次不做。
 
 ## 4. 当前事务与恢复语义
 
