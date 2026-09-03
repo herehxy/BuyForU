@@ -10,3 +10,4 @@ web/dist/
 *.iml
 .DS_Store
 reports/k6/
+.workbuddy/
