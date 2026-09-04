@@ -258,6 +258,17 @@ Review 不只检查正常路径，还模拟了：
 
 `heartbeatOver` 与 `renewLease` 是包级私有而非私有，属于为可测性开的一道缝。代价是并发包内部多出两个非 API 方法；收益是"判定依据与持久化期限是否一致"这类缺陷能被集成测试拦住——Bug 3 和 Bug 4 都属于这一类，纯单测两次都没能发现。
 
+### 3.5 排查过但不构成缺陷的一项：`JdbcConversationMemory` 的 `queryForObject`
+
+`JdbcConversationMemory.appendUserMessage`（第 29 行）同样用 `queryForObject` 读取可能不存在的行，表面看违反不变量 I7。核查结论是**不可达，故不修改**：
+
+- 全仓不存在任何删除 `agent_schema.conversation` 的 SQL 或 Java 路径。
+- 第 25-28 行的 `INSERT ... ON CONFLICT (conversation_id) DO NOTHING` 与随后的 `SELECT ... FOR UPDATE` 处于同一事务内，行必然存在。
+
+`cancellationRequested` 与之的本质区别在于前者有明确可达路径（租约被 `recoverExpired()` 回收），此处没有。为不可达状态增加防御分支只会引入永远走不到、也无法有效测试的代码，且若该状态真的出现，静默放行比抛异常更容易掩盖问题。
+
+判断标准记录下来：不变量 I7 的适用前提是"行可能不存在"，不能以写法相似为由一律改写。
+
 ## 4. 当前事务与恢复语义
 
 ### 4.1 预占响应未知
@@ -293,7 +304,7 @@ git diff --check
 | --- | --- |
 | 单元测试 | 固定图、PlanSpec、预算、Commerce effect、取消、订单恢复、MCP cause 分类、事务内网络调用保护、RAG 切块 |
 | Commerce 集成测试 | PostgreSQL 预算快照、订单按快照解析、Outbox 投递 |
-| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮） |
+| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮）、12 run × 8 worker 并发争用下的租约互斥性与 epoch 栅栏 |
 | 前端构建 | TypeScript 编译、Vite 生产构建 |
 | 外部联调 | DeepSeek/MCP/Ollama 需要本地凭据和运行服务，不能由离线单测代替 |
 
