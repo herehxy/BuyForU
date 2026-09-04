@@ -304,7 +304,7 @@ git diff --check
 | --- | --- |
 | 单元测试 | 固定图、PlanSpec、预算、Commerce effect、取消、订单恢复、MCP cause 分类、事务内网络调用保护、RAG 切块 |
 | Commerce 集成测试 | PostgreSQL 预算快照、订单按快照解析、Outbox 投递 |
-| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮）、12 run × 8 worker 并发争用下的租约互斥性与 epoch 栅栏 |
+| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮）、12 run × 8 worker 并发争用下的租约互斥性与 epoch 栅栏、200 命令 × 20 用户全链路吞吐（受理 → 限流 → 公平队列 → 领取 → 执行 → 释放，实测吞吐 878 条/秒、端到端 p95=278ms，并断言全部成功、无残留租约、队列排空、无用户饿死） |
 | 前端构建 | TypeScript 编译、Vite 生产构建 |
 | 外部联调 | DeepSeek/MCP/Ollama 需要本地凭据和运行服务，不能由离线单测代替 |
 
