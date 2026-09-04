@@ -23,11 +23,16 @@ public final class PostgresSupport {
     }
 
     public static DataSource dataSource(PostgreSQLContainer<?> postgres) {
+        return dataSource(postgres, 4);
+    }
+
+    /** 并发争用测试需要大于并发度的连接池，否则测到的是连接饥饿而不是租约竞争。 */
+    public static DataSource dataSource(PostgreSQLContainer<?> postgres, int poolSize) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(postgres.getJdbcUrl());
         config.setUsername(postgres.getUsername());
         config.setPassword(postgres.getPassword());
-        config.setMaximumPoolSize(4);
+        config.setMaximumPoolSize(poolSize);
         HikariDataSource dataSource = new HikariDataSource(config);
         Flyway.configure()
                 .dataSource(dataSource)
