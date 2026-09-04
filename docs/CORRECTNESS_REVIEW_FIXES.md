@@ -107,6 +107,7 @@ Review 不只检查正常路径，还模拟了：
 | HTTP DTO 无边界 | 超大集合和未知字段可以进入业务 | 独立 HTTP 输入模型、长度/数量限制、放宽字段白名单 |
 | Flyway 集成测试冲突 | Agent 扫描到 Commerce 的同版本迁移 | Agent 测试固定使用自身 migration 目录 |
 | 长时间规划命令被 90 秒硬阈值误杀 | heartbeat 用命令“首次开始时间”判定卡住，与 PLANNING 期限 210 秒矛盾 | 续租判据改为命令期限 `deadlineAt`；中断结果区分“用户取消”与“期限届满”（见 3.3） |
+| 一条陈旧租约中断整轮心跳 | `cancellationRequested` 用 `queryForObject` 查询可能不存在的行，空结果抛异常并从心跳循环中冒出 | 改用 `query` 判空；无匹配行时返回 `false`，交由后续更新命中 0 行判定为租约丢失并摘除（见 3.4） |
 
 ### 3.2 本次重点修复的两个取消 Bug
 
@@ -202,6 +203,61 @@ Review 不只检查正常路径，还模拟了：
 
 假死线程（例如死循环）会占用租约至期限届满，PLANNING 最长 210 秒。这是有界上界，且崩溃实例仍由 `recoverExpired()` 兜底，因此可接受。若未来需要提前识别假死，可在业务图节点推进时记录进展时间（方案 C），但需扩大改动面，本次不做。
 
+### 3.4 Bug 4：一条陈旧租约会中断整轮心跳，拖垮同实例上所有在跑的命令
+
+本缺陷不是代码走查发现的，而是为 Bug 3 补集成测试时被测出来的——单测无法暴露，因为它只在"读不到租约行"时出现。
+
+#### 失败场景
+
+1. 命令 A 领取租约（epoch=5），开始执行。
+2. A 执行时间超过租约时长（30 秒），期间任意一次续租窗口被错过——调度饥饿、GC 停顿、CPU 抢占都足以造成。
+3. `recoverExpiredLeases()` 每 5 秒执行一次，回收 A 的租约并把 `agent_run_execution` 的 `active_command_id`、`lease_until` 清空。
+4. A 的 `execute()` 尚未返回，`activeLeases` 里仍留着 epoch=5 的旧租约。
+5. 下一次心跳调用 `cancellationRequested(lease)`，该 SQL 以 `run_id + active_command_id + execution_epoch` 三元组匹配，此时命中 0 行。
+6. `queryForObject` 对空结果抛 `EmptyResultDataAccessException`。
+7. 异常从 `activeLeases.forEach` 中冒出，**整轮心跳在此中断，排在后面的所有租约全部错过这一轮续租**。
+
+危害高于 Bug 3：Bug 3 只杀掉超时的那一条命令，本缺陷是跨命令的连带损伤。陈旧条目在 `execute()` 的 `finally` 之前不会消失，因此**之后每一次心跳（每 10 秒）都在同一条目上中断**，该实例上所有在跑命令的租约会持续得不到续租，直至集体被 `recoverExpired()` 回收并降级为 RETRY_WAIT。
+
+触发条件比"跨实例竞争"常见得多：单实例、单个慢命令即可复现。
+
+#### 根因
+
+`RunLeaseRepository.cancellationRequested` 用 `jdbc.queryForObject` 查询一个**可能不存在**的行。同类中其他 `queryForObject` 都是 `count(*)` 或带 `COALESCE` 的标量子查询，恒返回一行，因此只有这一处有隐患——而它恰好位于心跳循环内部。
+
+#### 当前修复
+
+`cancellationRequested` 改用 `jdbc.query`，无匹配行时返回 `false` 而不是抛异常：
+
+- 语义正确：查不到行意味着本实例的租约已失效，而非"用户没取消"。
+- 自愈：返回 `false` 后判定继续走到 `leases.heartbeat(...)`，该更新以相同三元组为条件，命中 0 行 → `LEASE_LOST` → 从 `activeLeases` 摘除该条目。陈旧租约在**同一轮**内被清除，循环得以继续。
+
+同时把心跳的逐条逻辑从私有 lambda 抽成包级私有方法 `renewLease(...)` 与 `heartbeatOver(...)`，使集成测试能在真实 PostgreSQL 上驱动整轮判定，并验证"单条异常不中断整轮"。
+
+#### 一个易错点（记录以备后续维护）
+
+`heartbeatOver` 不能在 `forEach` 期间对传入的 Map 做结构修改：`ConcurrentHashMap` 允许，`LinkedHashMap` 会抛 `ConcurrentModificationException`。生产代码用的是 `ConcurrentHashMap`，因此不会触发，但测试缝传入的可能是任意 Map。实现上改为先收集待摘除的 key、遍历结束后统一摘除，对任何 `Map` 都成立。
+
+#### 不变量
+
+- I6：心跳循环中任何单条租约的处理失败，都不得影响其余租约在该轮的处理。
+- I7：读取"可能不存在的行"禁止使用 `queryForObject`；只能用 `query` 后判空，或 `count(*)` / `COALESCE` 这类恒返回一行的写法。
+
+#### 对应测试
+
+`CommandWorkerHeartbeatIT`（新增集成测试，7 条）：
+
+- `renewsPlanningCommandThatRanBeyondNinetySeconds` — 在真实库上锁死 Bug 3 的回归
+- `stopsOnceThePersistedDeadlineHasPassed` — 直接改库里的 `deadline_at`，证明判定读的是持久化列而非内存对象
+- `stopsExactlyAtTheDeadline` / `stopsWhenCancellationWasRequested`
+- `toleratesALeaseThatRecoveryAlreadyReclaimed` — 本缺陷的直接回归锁
+- `staleLeaseDoesNotAbortTheRestOfTheHeartbeatCycle` — 核心：陈旧租约不得拖垮整轮
+- `reportsLeaseLostWhenAnotherWorkerTookOver` — 被更高 epoch 接管时报告丢失而非假装成功
+
+#### 已知取舍
+
+`heartbeatOver` 与 `renewLease` 是包级私有而非私有，属于为可测性开的一道缝。代价是并发包内部多出两个非 API 方法；收益是"判定依据与持久化期限是否一致"这类缺陷能被集成测试拦住——Bug 3 和 Bug 4 都属于这一类，纯单测两次都没能发现。
+
 ## 4. 当前事务与恢复语义
 
 ### 4.1 预占响应未知
@@ -237,7 +293,7 @@ git diff --check
 | --- | --- |
 | 单元测试 | 固定图、PlanSpec、预算、Commerce effect、取消、订单恢复、MCP cause 分类、事务内网络调用保护、RAG 切块 |
 | Commerce 集成测试 | PostgreSQL 预算快照、订单按快照解析、Outbox 投递 |
-| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除 |
+| Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮） |
 | 前端构建 | TypeScript 编译、Vite 生产构建 |
 | 外部联调 | DeepSeek/MCP/Ollama 需要本地凭据和运行服务，不能由离线单测代替 |
 

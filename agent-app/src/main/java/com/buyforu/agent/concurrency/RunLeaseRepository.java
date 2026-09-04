@@ -146,11 +146,16 @@ public class RunLeaseRepository implements RunExecutionGuard {
     }
 
     public boolean cancellationRequested(Lease lease) {
-        Boolean requested = jdbc.queryForObject("""
+        // 不能用 queryForObject：租约行被 recoverExpired 清空，或被更高 epoch 的实例接管后，
+        // 三元组匹配不到任何行，queryForObject 会抛 EmptyResultDataAccessException。
+        // 本方法由 heartbeat 在遍历 activeLeases 的循环里调用，抛异常会中断整轮续租——
+        // 一个陈旧租约就会拖垮同实例上所有还在跑的命令。
+        // 查不到时返回 false，交由后续 heartbeat(...) 的更新命中 0 行判定为租约丢失并摘除。
+        var rows = jdbc.query("""
                 SELECT cancel_requested FROM agent_schema.agent_run_execution
                 WHERE run_id=? AND active_command_id=? AND execution_epoch=?
-                """, Boolean.class, lease.runId(), lease.commandId(), lease.epoch());
-        return Boolean.TRUE.equals(requested);
+                """, (rs, row) -> rs.getBoolean(1), lease.runId(), lease.commandId(), lease.epoch());
+        return !rows.isEmpty() && Boolean.TRUE.equals(rows.getFirst());
     }
 
     public void requestCancellation(String runId) {

@@ -7,17 +7,22 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import javax.sql.DataSource;
 
-final class PostgresSupport {
+/**
+ * 集成测试共享的 PostgreSQL 容器与数据源。public 是因为并发包内的 IT
+ * （如 CommandWorkerHeartbeatIT）需要访问包级私有的判定方法，因而必须留在被测类同包，
+ * 无法放进 com.buyforu.agent.it。
+ */
+public final class PostgresSupport {
     private PostgresSupport() { }
 
-    static PostgreSQLContainer<?> postgres() {
+    public static PostgreSQLContainer<?> postgres() {
         return new PostgreSQLContainer<>("pgvector/pgvector:pg17")
                 .withDatabaseName("buyforu")
                 .withUsername("buyforu")
                 .withPassword("buyforu");
     }
 
-    static DataSource dataSource(PostgreSQLContainer<?> postgres) {
+    public static DataSource dataSource(PostgreSQLContainer<?> postgres) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(postgres.getJdbcUrl());
         config.setUsername(postgres.getUsername());

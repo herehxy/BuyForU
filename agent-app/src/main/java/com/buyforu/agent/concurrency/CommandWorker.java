@@ -10,6 +10,8 @@ import tools.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PreDestroy;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -85,25 +87,52 @@ public class CommandWorker {
         }
     }
 
+    /** 单条租约的续租结果。STOP 要求调用方中断 worker；LEASE_LOST 表示租约已被他人接管。 */
+    enum HeartbeatOutcome { RENEWED, STOP, LEASE_LOST }
+
     /** 续租使用独立短事务，绝不和正在进行的网络调用共享连接。 */
     @Scheduled(fixedDelayString = "${buyforu.concurrency.lease-heartbeat:10s}", scheduler = "leaseScheduler")
     void heartbeat() {
-        Instant now = Instant.now();
-        activeLeases.forEach((commandId, lease) -> {
-            boolean cancelRequested = leases.cancellationRequested(lease);
-            // 判据是命令期限而非已运行时长：PLANNING 允许 210 秒，慢模型响应与三级 Replan 必须能跑满该期限。
-            Instant deadlineAt = commands.find(commandId).map(AgentCommand::deadlineAt).orElse(null);
-            if (cancelRequested || !shouldRenewLease(deadlineAt, now)) {
-                inFlight.cancel(commandId);
-                Thread worker = activeThreads.get(commandId);
-                if (worker != null) worker.interrupt();
-                // 取消或期限届满后不能再续租，否则 recoverExpired 永远看不到这条 RUNNING。
-                return;
-            }
-            if (!leases.heartbeat(lease, now.plus(properties.leaseDuration()))) {
-                activeLeases.remove(commandId);
+        heartbeatOver(activeLeases, Instant.now());
+    }
+
+    /**
+     * 对一批租约跑完整一轮心跳，丢失的租约会从传入集合中摘除。
+     * 包级私有测试缝：单条判定正确不等于整轮正确——历史上"某条租约查询不到行"
+     * 会抛异常中断 forEach，让其余命令全部错过这一轮续租。只有驱动整轮才能拦住。
+     */
+    void heartbeatOver(Map<UUID, RunLeaseRepository.Lease> inFlightLeases, Instant now) {
+        // 先收集、遍历结束后再摘除。forEach 期间做结构修改能否成立取决于具体 Map 实现
+        // （ConcurrentHashMap 允许，LinkedHashMap 抛 ConcurrentModificationException），
+        // 摘除后置让本方法对任何 Map 都成立。
+        List<UUID> lost = new ArrayList<>();
+        inFlightLeases.forEach((commandId, lease) -> {
+            switch (renewLease(commandId, lease, now)) {
+                case RENEWED -> { }
+                case STOP -> {
+                    inFlight.cancel(commandId);
+                    Thread worker = activeThreads.get(commandId);
+                    if (worker != null) worker.interrupt();
+                    // 取消或期限届满后不能再续租，否则 recoverExpired 永远看不到这条 RUNNING。
+                }
+                case LEASE_LOST -> lost.add(commandId);
             }
         });
+        lost.forEach(inFlightLeases::remove);
+    }
+
+    /**
+     * 逐条续租判定。包级私有而非私有，是为了让集成测试能在真实 PostgreSQL 上驱动这段逻辑，
+     * 而不必启动调度器和私有字段 activeLeases——历史上"判定正确但读到的期限不对"正是缺陷成因。
+     */
+    HeartbeatOutcome renewLease(UUID commandId, RunLeaseRepository.Lease lease, Instant now) {
+        if (leases.cancellationRequested(lease)) return HeartbeatOutcome.STOP;
+        // 判据是命令期限而非已运行时长：PLANNING 允许 210 秒，慢模型响应与三级 Replan 必须能跑满该期限。
+        Instant deadlineAt = commands.find(commandId).map(AgentCommand::deadlineAt).orElse(null);
+        if (!shouldRenewLease(deadlineAt, now)) return HeartbeatOutcome.STOP;
+        return leases.heartbeat(lease, now.plus(properties.leaseDuration()))
+                ? HeartbeatOutcome.RENEWED
+                : HeartbeatOutcome.LEASE_LOST;
     }
 
     @Scheduled(fixedDelay = 3600000, scheduler = "maintenanceScheduler")
