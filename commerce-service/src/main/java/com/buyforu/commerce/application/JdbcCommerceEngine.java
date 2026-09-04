@@ -1,5 +1,6 @@
 package com.buyforu.commerce.application;
 
+import com.buyforu.commerce.port.CatalogAttributeNormalizer;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,7 +20,10 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -64,8 +68,31 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    public List<InventoryItem> listInventory() {
+        return jdbc.query("""
+                SELECT s.sku_id, p.name, p.brand, p.category, s.unit_price, i.available_quantity,
+                       COALESCE((
+                           SELECT SUM(r.quantity)
+                           FROM commerce_schema.inventory_reservation r
+                           WHERE r.sku_id = s.sku_id AND r.status = 'ACTIVE' AND r.expires_at > now()
+                       ), 0) AS reserved_quantity
+                FROM commerce_schema.sku s
+                JOIN commerce_schema.product p ON p.product_id = s.product_id
+                JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
+                WHERE s.status = 'ACTIVE'
+                ORDER BY p.category, s.unit_price, s.sku_id
+                """, (result, row) -> new InventoryItem(
+                result.getString("sku_id"), result.getString("name"), result.getString("brand"),
+                result.getString("category"), new Money(result.getBigDecimal("unit_price"), "CNY"),
+                result.getInt("available_quantity"), result.getInt("reserved_quantity")));
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         LocalDate deliveryDate = resolveDeliveryDate(request.addressId(), request.userId());
+        // 一次搜索只读取一次促销/运费规则，避免候选数量扩大后产生每 SKU 两次查询的 N+1。
+        SearchPricing pricing = loadSearchPricing(clock.instant());
+        int fetchLimit = Math.min(200, Math.max(request.limit() * 10, 50));
         List<ProductCandidate> candidates = jdbc.query("""
                 SELECT p.product_id, s.sku_id, p.name, p.brand, p.attributes::text,
                        s.unit_price, i.available_quantity
@@ -74,24 +101,27 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
                 WHERE s.status = 'ACTIVE'
                   AND (? = '' OR lower(p.category) = lower(?))
-                  AND (? = '' OR lower(p.name) LIKE lower('%' || ? || '%') OR lower(p.category) LIKE lower('%' || ? || '%'))
+                  AND i.available_quantity >= ?
                 ORDER BY s.unit_price
+                LIMIT ?
                 """, (result, row) -> new ProductCandidate(
                         result.getString("product_id"), result.getString("sku_id"), result.getString("name"),
                         result.getString("brand"), readAttributes(result.getString("attributes")),
                         new Money(result.getBigDecimal("unit_price"), "CNY"),
-                        result.getInt("available_quantity") >= request.quantity(), deliveryDate),
-                normalized(request.category()), normalized(request.category()), normalized(request.query()),
-                normalized(request.query()), normalized(request.query())).stream()
+                        true, deliveryDate),
+                normalized(request.category()), normalized(request.category()),
+                request.quantity(), fetchLimit).stream()
+                .filter(candidate -> matchesQuery(request.query(), candidate))
                 .filter(candidate -> request.excludedBrands().stream()
                         .noneMatch(brand -> brand.equalsIgnoreCase(candidate.brand())))
-                .filter(candidate -> request.requiredAttributes().entrySet().stream()
+                .filter(candidate -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
+                        .entrySet().stream()
                         .allMatch(entry -> entry.getValue().equalsIgnoreCase(candidate.attributes().get(entry.getKey()))))
-                .filter(candidate -> request.budgetMax() == null
-                        || candidate.displayPrice().amount().compareTo(request.budgetMax().amount()) <= 0)
                 .filter(candidate -> request.deliveryBy() == null
                         || !candidate.deliveryDate().isAfter(request.deliveryBy()))
-                .filter(ProductCandidate::available)
+                // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
+                .filter(candidate -> matchesBudget(candidate.displayPrice().amount(), request.quantity(),
+                        request.budgetMax(), request.budgetMin(), pricing))
                 .limit(request.limit())
                 .toList();
         return new SearchResult(candidates, clock.instant());
@@ -106,22 +136,26 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, (result, row) -> result.getBigDecimal(1), request.skuId()).stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SKU_NOT_FOUND", "unknown sku: " + request.skuId()));
         Instant now = clock.instant();
-        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(request.quantity()));
-        List<DiscountLine> discounts = new ArrayList<>();
-        BigDecimal discount = BigDecimal.ZERO;
-        List<PromotionRow> promotions = jdbc.query("""
-                SELECT promotion_code, description, discount_amount
+        PricedItems priced = priceItems(unitPrice, request.quantity(), now);
+        return new Quote(UUID.randomUUID().toString(), nextVersion("quote_version_seq"),
+                request.skuId(), request.quantity(),
+                new Money(priced.itemAmount(), "CNY"), priced.discounts(), new Money(priced.shipping(), "CNY"),
+                new Money(priced.payable(), "CNY"),
+                deliveryPromise, now, now.plus(QUOTE_TTL));
+    }
+
+    private PricedItems priceItems(BigDecimal unitPrice, int quantity, Instant now) {
+        return priceItems(unitPrice, quantity, loadSearchPricing(now));
+    }
+
+    private SearchPricing loadSearchPricing(Instant now) {
+        List<SearchPromotionRow> promotions = jdbc.query("""
+                SELECT promotion_code, description, minimum_spend, discount_amount
                 FROM commerce_schema.promotion_rule
-                WHERE active AND starts_at <= ? AND ends_at > ? AND minimum_spend <= ?
+                WHERE active AND starts_at <= ? AND ends_at > ?
                 ORDER BY priority DESC, discount_amount DESC, promotion_code
-                LIMIT 1
-                """, (result, row) -> new PromotionRow(result.getString(1), result.getString(2),
-                result.getBigDecimal(3)), Timestamp.from(now), Timestamp.from(now), itemAmount);
-        if (!promotions.isEmpty()) {
-            PromotionRow promotion = promotions.getFirst();
-            discount = promotion.discountAmount().min(itemAmount);
-            discounts.add(new DiscountLine(promotion.code(), promotion.description(), new Money(discount, "CNY")));
-        }
+                """, (result, row) -> new SearchPromotionRow(result.getString(1), result.getString(2),
+                result.getBigDecimal(3), result.getBigDecimal(4)), Timestamp.from(now), Timestamp.from(now));
         ShippingRule shippingRule = jdbc.query("""
                 SELECT free_shipping_threshold, standard_fee
                 FROM commerce_schema.shipping_rule WHERE active
@@ -129,13 +163,41 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, (result, row) -> new ShippingRule(result.getBigDecimal(1), result.getBigDecimal(2)))
                 .stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SHIPPING_RULE_MISSING", "no active shipping rule"));
+        return new SearchPricing(promotions, shippingRule);
+    }
+
+    private static PricedItems priceItems(BigDecimal unitPrice, int quantity, SearchPricing pricing) {
+        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
+        List<DiscountLine> discounts = new ArrayList<>();
+        BigDecimal discount = BigDecimal.ZERO;
+        SearchPromotionRow promotion = pricing.promotions().stream()
+                .filter(row -> row.minimumSpend().compareTo(itemAmount) <= 0).findFirst().orElse(null);
+        if (promotion != null) {
+            discount = promotion.discountAmount().min(itemAmount);
+            discounts.add(new DiscountLine(promotion.code(), promotion.description(), new Money(discount, "CNY")));
+        }
+        ShippingRule shippingRule = pricing.shippingRule();
         BigDecimal shipping = itemAmount.compareTo(shippingRule.freeShippingThreshold()) >= 0
                 ? BigDecimal.ZERO : shippingRule.standardFee();
-        return new Quote(UUID.randomUUID().toString(), nextVersion("quote_version_seq"),
-                request.skuId(), request.quantity(),
-                new Money(itemAmount, "CNY"), discounts, new Money(shipping, "CNY"),
-                new Money(itemAmount.subtract(discount).add(shipping), "CNY"),
-                deliveryPromise, now, now.plus(QUOTE_TTL));
+        return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
+    }
+
+    private static boolean matchesBudget(BigDecimal unitPrice, int quantity, Money budgetMax, Money budgetMin,
+                                         SearchPricing pricing) {
+        BigDecimal payable = priceItems(unitPrice, quantity, pricing).payable();
+        if (budgetMax != null && payable.compareTo(budgetMax.amount()) > 0) return false;
+        return budgetMin == null || payable.compareTo(budgetMin.amount()) >= 0;
+    }
+
+    private static void assertWithinBudget(Quote quote, Money budgetMax, Money budgetMin) {
+        if (budgetMax != null && quote.payableAmount().amount().compareTo(budgetMax.amount()) > 0) {
+            throw new CommerceException("BUDGET_EXCEEDED",
+                    "payable " + quote.payableAmount().amount() + " exceeds budget " + budgetMax.amount());
+        }
+        if (budgetMin != null && quote.payableAmount().amount().compareTo(budgetMin.amount()) < 0) {
+            throw new CommerceException("BUDGET_BELOW_MINIMUM",
+                    "payable " + quote.payableAmount().amount() + " is below budget floor " + budgetMin.amount());
+        }
     }
 
     @Override
@@ -182,12 +244,14 @@ public class JdbcCommerceEngine implements CommerceGateway {
     public ConfirmableOrderSnapshot prepareConfirmableOrder(PrepareOrderRequest request, EffectContext effect) {
         // ===== 确认前交易准备：重新报价、扣减可售库存、生成预占和不可篡改快照 =====
         assertEffectUser(effect, request.userId());
+        // 预算必须进摘要：同一 effect 改预算不能重放旧快照。
         String requestHash = hash("prepare", request.userId(), request.skuId(),
-                String.valueOf(request.quantity()), request.addressId());
+                String.valueOf(request.quantity()), request.addressId(), budgetKey(request.budgetMax()),
+                budgetKey(request.budgetMin()));
         ConfirmableOrderSnapshot replay = beginEffect(effect, "PREPARE_CONFIRMABLE_ORDER", requestHash,
                 ConfirmableOrderSnapshot.class);
         if (replay != null) return replay;
-        expireReservationsLocked();
+        expireReservationsForSku(request.skuId());
         // FOR UPDATE 串行化同一 SKU 的并发预占；检查与扣减处于同一事务，避免先查后扣导致超卖。
         Integer stock = jdbc.query("""
                 SELECT available_quantity FROM commerce_schema.inventory WHERE sku_id = ? FOR UPDATE
@@ -196,6 +260,8 @@ public class JdbcCommerceEngine implements CommerceGateway {
         if (stock < request.quantity()) throw new CommerceException("OUT_OF_STOCK", "insufficient inventory");
 
         Quote quote = quote(new QuoteRequest(request.skuId(), request.quantity(), request.userId(), request.addressId()));
+        // 搜索用的是估算应付；这里用权威报价再卡一次，超预算不扣库存。
+        assertWithinBudget(quote, request.budgetMax(), request.budgetMin());
         jdbc.update("""
                 UPDATE commerce_schema.inventory
                 SET available_quantity = available_quantity - ?, version = version + 1 WHERE sku_id = ?
@@ -273,14 +339,13 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 approval == null ? "" : approval.approvalId(), approval == null ? "" : approval.expectedSummaryHash());
         Order replay = beginEffect(effect, "CREATE_ORDER", requestHash, Order.class);
         if (replay != null) return replay;
-        expireReservationsLocked();
-
         ConfirmableOrderSnapshot snapshot = jdbc.query("""
                 SELECT snapshot::text FROM commerce_schema.confirmable_snapshot
                 WHERE snapshot_id = ? FOR UPDATE
                 """, (result, row) -> json.readValue(result.getString(1), ConfirmableOrderSnapshot.class),
                 command.snapshotId()).stream().findFirst()
                 .orElseThrow(() -> new CommerceException("SNAPSHOT_NOT_FOUND", "snapshot not found"));
+        expireReservationsForSku(snapshot.reservation().skuId());
         validateApprovalIdentity(command, snapshot);
         // 即使客户端换了新的网络幂等键，只要来源快照相同，也只能存在一个订单。
         Order existingOrder = jdbc.query("""
@@ -320,6 +385,27 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 """, UUID.randomUUID().toString(), order.orderId(), json.writeValueAsString(order));
         completeEffect(effect, order.orderId(), order);
         return order;
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        if (userId == null || userId.isBlank() || snapshotId == null || snapshotId.isBlank()) {
+            throw new IllegalArgumentException("userId and snapshotId are required");
+        }
+        // 先验证快照归属，避免把其他用户的快照当成“没有订单”。
+        String owner = jdbc.query("""
+                SELECT user_id FROM commerce_schema.confirmable_snapshot WHERE snapshot_id=?
+                """, (result, row) -> result.getString(1), snapshotId).stream().findFirst()
+                .orElseThrow(() -> new CommerceException("SNAPSHOT_NOT_FOUND", "snapshot not found"));
+        if (!userId.equals(owner)) {
+            throw new CommerceException("SNAPSHOT_USER_MISMATCH", "snapshot belongs to another user");
+        }
+        return jdbc.query("""
+                SELECT order_payload::text FROM commerce_schema.orders
+                WHERE source_snapshot_id=? AND user_id=?
+                """, (result, row) -> json.readValue(result.getString(1), Order.class), snapshotId, userId)
+                .stream().findFirst();
     }
 
     private LocalDate resolveDeliveryDate(String addressId, String expectedUserId) {
@@ -378,26 +464,43 @@ public class JdbcCommerceEngine implements CommerceGateway {
 
     @Transactional
     public int expireReservationsNow() {
-        return expireReservationsLocked();
+        return expireReservationsBatch(100);
     }
 
-    private int expireReservationsLocked() {
-        // 先锁住所有到期 ACTIVE 记录并归还库存，最后统一标记 EXPIRED；整个过程是一个事务。
-        List<ReservationRow> expired = jdbc.query("""
-                SELECT sku_id, quantity, status FROM commerce_schema.inventory_reservation
-                WHERE status = 'ACTIVE' AND expires_at <= ? FOR UPDATE
-                """, (result, row) -> new ReservationRow(result.getString(1), result.getInt(2), result.getString(3)),
-                Timestamp.from(clock.instant()));
-        for (ReservationRow row : expired) {
+    /** 下单热路径只回收当前 SKU，避免锁住全表过期预占。 */
+    private int expireReservationsForSku(String skuId) {
+        return expireReservations("""
+                SELECT reservation_id, sku_id, quantity FROM commerce_schema.inventory_reservation
+                WHERE sku_id = ? AND status = 'ACTIVE' AND expires_at <= ? FOR UPDATE
+                """, skuId, Timestamp.from(clock.instant()));
+    }
+
+    /** 后台作业：SKIP LOCKED 分批回收，多个实例不会抢同一行。 */
+    private int expireReservationsBatch(int limit) {
+        return expireReservations("""
+                SELECT reservation_id, sku_id, quantity FROM commerce_schema.inventory_reservation
+                WHERE status = 'ACTIVE' AND expires_at <= ?
+                ORDER BY sku_id, reservation_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT ?
+                """, Timestamp.from(clock.instant()), limit);
+    }
+
+    private int expireReservations(String sql, Object... args) {
+        List<ExpiredReservation> expired = jdbc.query(sql,
+                (result, row) -> new ExpiredReservation(result.getString(1), result.getString(2), result.getInt(3)),
+                args);
+        for (ExpiredReservation row : expired) {
             jdbc.update("""
                     UPDATE commerce_schema.inventory SET available_quantity = available_quantity + ?, version = version + 1
                     WHERE sku_id = ?
                     """, row.quantity(), row.skuId());
+            jdbc.update("""
+                    UPDATE commerce_schema.inventory_reservation SET status = 'EXPIRED'
+                    WHERE reservation_id = ? AND status = 'ACTIVE'
+                    """, row.reservationId());
         }
-        return jdbc.update("""
-                UPDATE commerce_schema.inventory_reservation SET status = 'EXPIRED'
-                WHERE status = 'ACTIVE' AND expires_at <= ?
-                """, Timestamp.from(clock.instant()));
+        return expired.size();
     }
 
     private long nextVersion(String sequence) {
@@ -446,6 +549,32 @@ public class JdbcCommerceEngine implements CommerceGateway {
         return value == null ? "" : value;
     }
 
+    private static final Set<String> IGNORED_QUERY_TOKENS = Set.of(
+            "以内", "帮我", "一台", "一个", "一下", "可以", "明天", "后天", "送达", "到货");
+
+    // 整句 query 做 LIKE 会搜不到。拆成词，命中名称/品牌/规格任一即可。
+    private static boolean matchesQuery(String query, ProductCandidate candidate) {
+        List<String> tokens = searchTokens(query);
+        if (tokens.isEmpty()) return true;
+        String haystack = (candidate.name() + " " + candidate.brand() + " "
+                + String.join(" ", candidate.attributes().values())).toLowerCase(Locale.ROOT);
+        return tokens.stream().anyMatch(haystack::contains);
+    }
+
+    private static List<String> searchTokens(String query) {
+        if (query == null || query.isBlank()) return List.of();
+        List<String> tokens = new ArrayList<>();
+        for (String raw : query.toLowerCase(Locale.ROOT).split("[^\\p{IsAlphabetic}\\p{IsDigit}]+")) {
+            if (raw.length() < 2 || raw.matches("\\d+") || IGNORED_QUERY_TOKENS.contains(raw)) continue;
+            tokens.add(raw);
+        }
+        return tokens;
+    }
+
+    private static String budgetKey(Money budgetMax) {
+        return budgetMax == null ? "" : budgetMax.amount().toPlainString() + "\u001f" + budgetMax.currency();
+    }
+
     private static String hash(String... values) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -457,8 +586,13 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     private record ReservationRow(String skuId, int quantity, String status) { }
+    private record ExpiredReservation(String reservationId, String skuId, int quantity) { }
     private record EffectRow(String operation, String requestHash, String status, String result) { }
     private record AddressRow(String userId, int deliveryDays) { }
-    private record PromotionRow(String code, String description, BigDecimal discountAmount) { }
+    private record SearchPromotionRow(String code, String description, BigDecimal minimumSpend,
+                                      BigDecimal discountAmount) { }
     private record ShippingRule(BigDecimal freeShippingThreshold, BigDecimal standardFee) { }
+    private record SearchPricing(List<SearchPromotionRow> promotions, ShippingRule shippingRule) { }
+    private record PricedItems(BigDecimal itemAmount, List<DiscountLine> discounts,
+                               BigDecimal shipping, BigDecimal payable) { }
 }

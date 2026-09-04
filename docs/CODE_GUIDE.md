@@ -45,7 +45,8 @@ infrastructure  Outbox 投递、预占过期任务、生产 Webhook
 ```text
 React 页面
   -> AgentRunController（从 JWT sub 获取 userId）
-  -> GraphShoppingWorkflow（幂等 runId + PostgreSQL 执行锁）
+  -> GraphShoppingWorkflow（幂等 runId + 固定图启动/恢复）
+  -> CommandWorker / RunLeaseRepository（短租约 + execution epoch 串行推进）
   -> FixedShoppingGraph（固定拓扑和 checkpoint）
   -> ShoppingWorkflowService（图节点动作）
   -> CommerceGateway（应用层端口）
@@ -92,12 +93,16 @@ ShoppingWorkflowService.planNewRun
 
 ## 6. 交易安全边界
 
+- `budgetMax` 是应付合计上限（商品小计 − 优惠 + 运费），不是吊牌单价。搜索与快照使用同一套计价；快照在扣库存前若应付超预算则拒绝预占。
 - Agent 只能传递条件、选择和审批证明，不能提供最终金额。
 - `prepareConfirmableOrder` 在同一事务中重新报价、锁库存并生成摘要快照。
 - 用户批准时必须提交当前 `snapshotId + summaryHash`。
 - `createOrder` 再次验证用户、快照、审批时间和预占状态。
 - 所有副作用先登记 `effectId/idempotencyKey`，成功结果可安全重放。
-- 订单与 Outbox 事件在同一数据库事务提交。
+- 订单与 Outbox 事件在同一数据库事务提交。Outbox 投递先短事务认领，HTTP 在事务外发送；至少投递一次，接收方按 `eventId` 去重。
+- 写命令的幂等键在同一个用户的同一个 run 内唯一，失败后换新 key 再试。
+- 非 START 命令先验 run 主人再落库；SSE 只认 `agent_run` 或 START 命令的用户。
+- 约束放宽必须由用户点名字段，不能靠句子里的“元”“预算”推断。
 
 ## 7. PostgreSQL Schema
 

@@ -1,5 +1,6 @@
 package com.buyforu.agent.concurrency;
 
+import com.buyforu.agent.application.RunExecutionGuard;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,7 +14,7 @@ import java.util.UUID;
  * 每个 run 的跨实例短租约。claim 提交后数据库连接立即归还；epoch 是防止旧 Worker 写回的栅栏令牌。
  */
 @Repository
-public class RunLeaseRepository {
+public class RunLeaseRepository implements RunExecutionGuard {
     private final JdbcTemplate jdbc;
 
     public RunLeaseRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
@@ -33,6 +34,26 @@ public class RunLeaseRepository {
         if (row.activeCommandId() != null && row.leaseUntil() != null && row.leaseUntil().isAfter(now)) {
             return Optional.empty();
         }
+        if (row.cancelRequested() && command.queueClass() != AgentCommand.QueueClass.CONTROL) {
+            // CANCEL 已先写入 PostgreSQL。后续普通命令不能因为重新领取租约而把取消标记清掉。
+            jdbc.update("""
+                    UPDATE agent_schema.agent_command SET status='CANCELLED',error_code='RUN_CANCEL_REQUESTED',
+                        completed_at=now() WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT')
+                    """, command.commandId());
+            return Optional.empty();
+        }
+        if (row.activeCommandId() != null) {
+            // 先恢复上一任已过期 Worker，再让新的命令竞争。这样不会覆盖 active_command_id，
+            // 也不会留下一个永远停在 RUNNING 的孤儿命令。
+            int recovered = recoverCommand(row.activeCommandId());
+            jdbc.update("""
+                    UPDATE agent_schema.agent_run_execution SET active_command_id=NULL,lease_owner=NULL,
+                        lease_until=NULL,updated_at=now() WHERE run_id=? AND active_command_id=?
+                    """, command.runId(), row.activeCommandId());
+            // 若正在领取的就是刚恢复的同一命令，可在本事务内直接换新 epoch；
+            // 若是另一个命令，则先让旧命令重新进入公平队列，避免越过 run 内顺序。
+            if (recovered == 1 && !row.activeCommandId().equals(command.commandId())) return Optional.empty();
+        }
         long epoch = row.epoch() + 1;
         int updated = jdbc.update("""
                 UPDATE agent_schema.agent_run_execution SET execution_epoch=?,active_command_id=?,lease_owner=?,
@@ -40,7 +61,8 @@ public class RunLeaseRepository {
                 """, epoch, command.commandId(), owner, Timestamp.from(leaseUntil), command.runId());
         int commandUpdated = jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='RUNNING',attempts=attempts+1,started_at=COALESCE(started_at,now()),
-                    execution_epoch=? WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT') AND available_at<=now()
+                    execution_epoch=? WHERE command_id=?
+                    AND (status='QUEUED' OR (status='RETRY_WAIT' AND available_at<=now()))
                 """, epoch, command.commandId());
         if (updated != 1 || commandUpdated != 1) throw new ClaimConflict();
         Long stateVersion = jdbc.queryForObject("""
@@ -56,8 +78,7 @@ public class RunLeaseRepository {
         int recovered = jdbc.update("""
                 UPDATE agent_schema.agent_command c SET
                     status=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
-                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at
-                                      ELSE now()+interval '1 second' END,
+                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at ELSE now() END,
                     error_code=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
                                     ELSE 'WORKER_LEASE_EXPIRED' END,
                     completed_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN now() ELSE NULL END
@@ -68,7 +89,33 @@ public class RunLeaseRepository {
                 UPDATE agent_schema.agent_run_execution SET active_command_id=NULL,lease_owner=NULL,lease_until=NULL,
                     updated_at=now() WHERE active_command_id IS NOT NULL AND lease_until<=now()
                 """);
+        // 防御“租约行已被清掉/覆盖，但命令仍是 RUNNING”的历史数据与异常窗口。
+        recovered += jdbc.update("""
+                UPDATE agent_schema.agent_command c SET
+                    status=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
+                    available_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN c.available_at ELSE now() END,
+                    error_code=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
+                                    ELSE 'ORPHAN_RUNNING_COMMAND' END,
+                    completed_at=CASE WHEN c.attempts>=3 OR c.deadline_at<=now() THEN now() ELSE NULL END
+                WHERE c.status='RUNNING'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_schema.agent_run_execution x
+                      WHERE x.active_command_id=c.command_id AND x.lease_until>now()
+                  )
+                """);
         return recovered;
+    }
+
+    private int recoverCommand(UUID commandId) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET
+                    status=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'EXPIRED' ELSE 'RETRY_WAIT' END,
+                    available_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN available_at ELSE now() END,
+                    error_code=CASE WHEN attempts>=3 OR deadline_at<=now() THEN 'COMMAND_RECOVERY_EXHAUSTED'
+                                    ELSE 'WORKER_LEASE_EXPIRED' END,
+                    completed_at=CASE WHEN attempts>=3 OR deadline_at<=now() THEN now() ELSE NULL END
+                WHERE command_id=? AND status='RUNNING'
+                """, commandId);
     }
 
     public boolean heartbeat(Lease lease, Instant leaseUntil) {
@@ -76,6 +123,18 @@ public class RunLeaseRepository {
                 UPDATE agent_schema.agent_run_execution SET lease_until=?,updated_at=now()
                 WHERE run_id=? AND active_command_id=? AND execution_epoch=? AND lease_owner=?
                 """, Timestamp.from(leaseUntil), lease.runId(), lease.commandId(), lease.epoch(), lease.owner()) == 1;
+    }
+
+    @Override
+    public boolean hasConflictingLiveLease(String runId) {
+        ExecutionContext current = ExecutionContext.current();
+        UUID currentCommandId = current != null && runId.equals(current.runId()) ? current.commandId() : null;
+        Integer count = jdbc.queryForObject("""
+                SELECT count(*) FROM agent_schema.agent_run_execution
+                WHERE run_id=? AND active_command_id IS NOT NULL AND lease_until>now()
+                  AND (?::uuid IS NULL OR active_command_id<>?::uuid)
+                """, Integer.class, runId, currentCommandId, currentCommandId);
+        return count != null && count > 0;
     }
 
     public boolean isCurrent(String runId, UUID commandId, long epoch) {
@@ -87,11 +146,16 @@ public class RunLeaseRepository {
     }
 
     public boolean cancellationRequested(Lease lease) {
-        Boolean requested = jdbc.queryForObject("""
+        // 不能用 queryForObject：租约行被 recoverExpired 清空，或被更高 epoch 的实例接管后，
+        // 三元组匹配不到任何行，queryForObject 会抛 EmptyResultDataAccessException。
+        // 本方法由 heartbeat 在遍历 activeLeases 的循环里调用，抛异常会中断整轮续租——
+        // 一个陈旧租约就会拖垮同实例上所有还在跑的命令。
+        // 查不到时返回 false，交由后续 heartbeat(...) 的更新命中 0 行判定为租约丢失并摘除。
+        var rows = jdbc.query("""
                 SELECT cancel_requested FROM agent_schema.agent_run_execution
                 WHERE run_id=? AND active_command_id=? AND execution_epoch=?
-                """, Boolean.class, lease.runId(), lease.commandId(), lease.epoch());
-        return Boolean.TRUE.equals(requested);
+                """, (rs, row) -> rs.getBoolean(1), lease.runId(), lease.commandId(), lease.epoch());
+        return !rows.isEmpty() && Boolean.TRUE.equals(rows.getFirst());
     }
 
     public void requestCancellation(String runId) {

@@ -12,5 +12,5 @@ public interface PlanningModel {
                     String failureReason, int attempt);
 
     PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints currentConstraints,
-                              String explicitUserInstruction);
+                              String explicitUserInstruction, java.util.List<String> fields);
 }

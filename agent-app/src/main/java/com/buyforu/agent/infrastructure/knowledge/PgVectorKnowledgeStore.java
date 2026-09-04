@@ -3,6 +3,8 @@ package com.buyforu.agent.infrastructure.knowledge;
 import com.buyforu.agent.application.KnowledgeRetriever;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,7 @@ import java.util.HexFormat;
  */
 @Repository
 public class PgVectorKnowledgeStore implements KnowledgeRetriever {
+    private static final Logger log = LoggerFactory.getLogger(PgVectorKnowledgeStore.class);
     private static final int MAX_CHUNK_CHARACTERS = 1200;
 
     private final JdbcTemplate jdbc;
@@ -140,25 +143,31 @@ public class PgVectorKnowledgeStore implements KnowledgeRetriever {
         if (minimumScore < -1 || minimumScore > 1) {
             throw new IllegalArgumentException("minimumScore must be between -1 and 1");
         }
-        assertCompatibleCorpus();
-        float[] queryEmbedding = dependencies.call(DependencyExecutor.Dependency.EMBEDDING,
-                Duration.ofSeconds(10), 1, () -> embeddingModel.embed(query));
-        validateEmbedding(queryEmbedding);
-        String vector = vectorLiteral(queryEmbedding);
-        return jdbc.query("""
-                SELECT d.document_id, d.title, d.source_uri, d.version,
-                       c.chunk_id, c.content, 1 - (c.embedding <=> CAST(? AS vector)) AS score
-                FROM agent_schema.knowledge_chunk c
-                JOIN agent_schema.knowledge_document d ON d.document_id = c.document_id
-                WHERE c.embedding IS NOT NULL
-                  AND d.embedding_model = ?
-                  AND 1 - (c.embedding <=> CAST(? AS vector)) >= ?
-                ORDER BY c.embedding <=> CAST(? AS vector), d.updated_at DESC
-                LIMIT ?
-                """, (rs, row) -> new KnowledgeHit(
-                        rs.getString("document_id"), rs.getString("title"), rs.getString("source_uri"),
-                        rs.getString("version"), rs.getString("chunk_id"), rs.getString("content"),
-                        rs.getDouble("score")), vector, embeddingModelName, vector, minimumScore, vector, limit);
+        try {
+            assertCompatibleCorpus();
+            float[] queryEmbedding = dependencies.call(DependencyExecutor.Dependency.EMBEDDING,
+                    Duration.ofSeconds(10), 1, () -> embeddingModel.embed(query));
+            validateEmbedding(queryEmbedding);
+            String vector = vectorLiteral(queryEmbedding);
+            return jdbc.query("""
+                    SELECT d.document_id, d.title, d.source_uri, d.version,
+                           c.chunk_id, c.content, 1 - (c.embedding <=> CAST(? AS vector)) AS score
+                    FROM agent_schema.knowledge_chunk c
+                    JOIN agent_schema.knowledge_document d ON d.document_id = c.document_id
+                    WHERE c.embedding IS NOT NULL
+                      AND d.embedding_model = ?
+                      AND 1 - (c.embedding <=> CAST(? AS vector)) >= ?
+                    ORDER BY c.embedding <=> CAST(? AS vector), d.updated_at DESC
+                    LIMIT ?
+                    """, (rs, row) -> new KnowledgeHit(
+                            rs.getString("document_id"), rs.getString("title"), rs.getString("source_uri"),
+                            rs.getString("version"), rs.getString("chunk_id"), rs.getString("content"),
+                            rs.getDouble("score")), vector, embeddingModelName, vector, minimumScore, vector, limit);
+        } catch (RuntimeException failure) {
+            // 知识库是可选证据。本地没有文档或类型解析失败时，不能把整次购物打挂。
+            log.warn("knowledge retrieve skipped: {}", failure.getMessage());
+            return List.of();
+        }
     }
 
     private void validateEmbedding(float[] embedding) {

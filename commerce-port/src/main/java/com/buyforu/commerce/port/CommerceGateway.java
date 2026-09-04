@@ -11,6 +11,8 @@ import com.buyforu.commerce.port.model.CommerceModels.*;
 public interface CommerceGateway {
     java.util.List<DeliveryAddress> listAddresses(String userId);
 
+    java.util.List<InventoryItem> listInventory();
+
     SearchResult searchProducts(SearchRequest request);
 
     Quote quote(QuoteRequest request);
@@ -25,4 +27,10 @@ public interface CommerceGateway {
     void releaseReservation(String reservationId, EffectContext effectContext);
 
     Order createOrder(CreateOrderCommand command, EffectContext effectContext);
+
+    /**
+     * 按人工确认快照查询已创建订单。
+     * 该方法是纯读操作，用于解析“Commerce 已下单、Agent 尚未保存”的结果未知窗口。
+     */
+    java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId);
 }

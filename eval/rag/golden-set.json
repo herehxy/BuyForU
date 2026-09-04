@@ -1,0 +1,17 @@
+[
+  {
+    "query": "7 天无理由退货要满足什么条件",
+    "mustIncludeDocumentIds": ["policy-return-7d"],
+    "minHits": 1
+  },
+  {
+    "query": "笔记本满减和包邮规则",
+    "mustIncludeDocumentIds": ["policy-promo-shipping"],
+    "minHits": 1
+  },
+  {
+    "query": "预占库存会锁多久",
+    "mustIncludeDocumentIds": ["policy-reservation"],
+    "minHits": 1
+  }
+]

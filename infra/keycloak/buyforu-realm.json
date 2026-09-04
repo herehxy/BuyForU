@@ -1,14 +1,15 @@
 {
   "realm": "buyforu",
   "enabled": true,
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "loginWithEmailAllowed": true,
   "resetPasswordAllowed": true,
-  "verifyEmail": true,
+  "verifyEmail": false,
   "sslRequired": "external",
   "roles": {
     "realm": [
-      { "name": "knowledge-admin", "description": "Can ingest versioned RAG knowledge" }
+      { "name": "knowledge-admin", "description": "Can ingest versioned RAG knowledge" },
+      { "name": "monitoring", "description": "Can scrape Agent Prometheus metrics" }
     ]
   },
   "clients": [
@@ -19,9 +20,12 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
-      "redirectUris": ["http://localhost:5173/auth/callback"],
+      "redirectUris": ["http://localhost:5173/auth/callback", "http://localhost:5173", "http://localhost:5173/"],
       "webOrigins": ["http://localhost:5173"],
-      "attributes": { "pkce.code.challenge.method": "S256" },
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173##http://localhost:5173/"
+      },
       "protocolMappers": [
         {
           "name": "BuyForU API audience",

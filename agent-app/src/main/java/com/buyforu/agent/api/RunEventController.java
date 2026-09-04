@@ -44,15 +44,25 @@ public class RunEventController {
     @GetMapping(path = "/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     SseEmitter stream(@AuthenticationPrincipal Jwt jwt, @PathVariable String runId,
                       @RequestHeader(value = "Last-Event-ID", defaultValue = "0") long lastEventId) {
-        // START 命令被接受后，首个 Agent state 尚未产生；使用持久化命令验证所有权即可立即订阅。
+        // 只认 run 主人（agent_run 或 START 命令），不认“我是否写过任意命令”。
         commands.assertRunOwner(runId, AuthenticatedUser.id(jwt));
         if (!connectionPermits.tryAcquire()) {
             throw new com.buyforu.agent.concurrency.CommandExceptions.AdmissionRejected(
                     "SSE connection capacity exceeded", 5);
         }
+        if (lastEventId < 0) {
+            connectionPermits.release();
+            throw new IllegalArgumentException("Last-Event-ID cannot be negative");
+        }
+        notifier.retain(runId);
         SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
         java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
-        Runnable release = () -> { if (released.compareAndSet(false, true)) connectionPermits.release(); };
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) {
+                notifier.release(runId);
+                connectionPermits.release();
+            }
+        };
         emitter.onCompletion(release); emitter.onTimeout(release); emitter.onError(ignored -> release.run());
         streams.submit(() -> publish(runId, lastEventId, emitter));
         return emitter;
@@ -66,7 +76,7 @@ public class RunEventController {
                 var batch = events.after(runId, cursor, 100);
                 for (var event : batch) {
                     emitter.send(SseEmitter.event().id(Long.toString(event.eventId())).name(event.eventType())
-                            .data(event.payload()));
+                            .data(Map.of("commandId", event.commandId(), "payload", event.payload())));
                     cursor = event.eventId();
                 }
                 long now = System.currentTimeMillis();

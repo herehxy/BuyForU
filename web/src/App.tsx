@@ -1,7 +1,7 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, listAddresses, listRuns, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
-import type { DeliveryAddress } from './api'
+import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listInventory, listRuns, pendingCommand, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import type { DeliveryAddress, InventoryItem } from './api'
 import type { AgentRun, CommandAccepted } from './types'
 import type { User } from 'oidc-client-ts'
 import { authConfigurationError, userManager } from './auth'
@@ -25,23 +25,39 @@ export function App() {
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([])
   const [restoreError, setRestoreError] = useState<string>()
   const [progress, setProgress] = useState<string>()
+  const [stock, setStock] = useState<InventoryItem[]>([])
+  const restoredCommand = useRef<string | undefined>(undefined)
+  const refreshStock = () => listInventory().then(setStock).catch(() => undefined)
   const mutation = useMutation({
     mutationFn: async (action: () => Promise<CommandAccepted>) => {
       const accepted = await action()
-      setProgress(`命令已进入 ${accepted.queueClass} 公平队列`)
-      return followRun(accepted, setProgress)
+      setProgress('任务已排队，等待执行')
+      return followRun(accepted, (update) => {
+        setProgress(update.label)
+        if (update.run) setRun(update.run)
+      })
     },
-    onSuccess: setRun,
+    onSuccess: (result) => {
+      setRun(result)
+      refreshStock()
+    },
   })
   const addressMutation = useMutation({ mutationFn: registerAddress, onSuccess: setAddress })
 
   // 登录后从服务端恢复地址和最近任务，页面刷新不丢失人工等待状态。
   useEffect(() => {
     if (!user) return
-    Promise.all([listAddresses(), listRuns()]).then(([addresses, runs]) => {
+    Promise.all([listAddresses(), listRuns(), listInventory()]).then(([addresses, runs, items]) => {
       setAddress(addresses[0])
       setRecentRuns(runs)
+      setStock(items)
       setRestoreError(undefined)
+      const pending = pendingCommand()
+      if (pending && restoredCommand.current !== pending.commandId) {
+        restoredCommand.current = pending.commandId
+        // 刷新页面后继续跟踪已经接纳的命令，而不是重新提交同一个业务动作。
+        mutation.mutate(() => Promise.resolve(pending))
+      }
     }).catch((failure: unknown) => {
       setRestoreError(failure instanceof Error ? failure.message : '无法恢复已有任务和配送地址。')
     })
@@ -60,9 +76,13 @@ export function App() {
         })
         .catch(() => userManager!.getUser()
           .then((authenticated) => setUser(authenticated?.expired ? null : authenticated)))
-    } else {
-      userManager.getUser().then((authenticated) => setUser(authenticated?.expired ? null : authenticated))
+      return
     }
+    // 退出后 Keycloak 回到站点根路径，清掉回调参数再读本地会话。
+    userManager.signoutRedirectCallback().catch(() => undefined).finally(() => {
+      window.history.replaceState({}, '', '/')
+      userManager!.getUser().then((authenticated) => setUser(authenticated?.expired ? null : authenticated))
+    })
   }, [])
 
   if (authConfigurationError) return <main className="shell"><div className="error">{authConfigurationError}</div></main>
@@ -101,17 +121,123 @@ export function App() {
 
       {addressMutation.error && <div className="error">{addressMutation.error.message}</div>}
       {mutation.error && <div className="error">{mutation.error.message}</div>}
-      {mutation.isPending && progress && <div className="status"><span />{progress}</div>}
+      {(mutation.isPending || run) && (
+        <AgentProgress phase={run?.phase} hint={mutation.isPending ? progress : undefined} />
+      )}
       {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
       {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
+      <InventoryBoard items={stock} onRefresh={refreshStock} />
       {!run && recentRuns.length > 0 && <section className="history">
         <h2>最近任务</h2>
         {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
-          onClick={() => setRun(item)}>
-          <span>{item.originalRequest}</span><strong>{item.phase}</strong>
+          onClick={() => getRun(item.runId).then(setRun).catch(() => setRun(item))}>
+          <span>{item.originalRequest}</span><strong>{phaseLabel(item.phase)}</strong>
         </button>)}
       </section>}
     </main>
+  )
+}
+
+function InventoryBoard({ items, onRefresh }: { items: InventoryItem[]; onRefresh: () => void }) {
+  return (
+    <section className="inventory">
+      <div className="inventory-head">
+        <h2>当前库存</h2>
+        <button type="button" className="secondary" onClick={onRefresh}>刷新</button>
+      </div>
+      <p>可售是现在还能买的数量；预占是已锁定、还没下单的件数。下单后预占消失，可售不会加回。</p>
+      <div className="inventory-table">
+        <div className="inventory-row head">
+          <span>SKU</span><span>商品</span><span>品类</span><span>标价</span><span>可售</span><span>预占</span>
+        </div>
+        {items.map((item) => (
+          <div className="inventory-row" key={item.skuId}>
+            <span>{item.skuId}</span>
+            <span>{item.brand} {item.name}</span>
+            <span>{item.category}</span>
+            <span>¥{item.unitPrice.amount}</span>
+            <strong>{item.availableQuantity}</strong>
+            <span>{item.reservedQuantity}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+const PIPELINE = [
+  { match: ['NEW', 'SEARCHING'], label: '理解需求并搜索' },
+  { match: ['NEEDS_CLARIFICATION'], label: '补充信息' },
+  { match: ['PRESENTING_CANDIDATES'], label: '选择商品' },
+  { match: ['PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL'], label: '确认金额' },
+  { match: ['CREATING_ORDER', 'COMPLETED'], label: '创建订单' },
+] as const
+
+function AgentProgress({ phase, hint }: { phase?: string; hint?: string }) {
+  const current = phase ?? 'NEW'
+  return (
+    <section className="progress">
+      <div className="status"><span />{hint || phaseLabel(current)}</div>
+      <ol className="steps">
+        {PIPELINE.map((step) => {
+          const phases = step.match as readonly string[]
+          const active = phases.includes(current)
+          const done = pipelineDone(current, phases[phases.length - 1])
+          return <li key={step.label} className={active ? 'active' : done ? 'done' : ''}>{step.label}</li>
+        })}
+      </ol>
+    </section>
+  )
+}
+
+function pipelineDone(phase: string, stepEnd: string): boolean {
+  const order = ['NEW', 'SEARCHING', 'NEEDS_CLARIFICATION', 'PRESENTING_CANDIDATES',
+    'PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL', 'CREATING_ORDER', 'COMPLETED']
+  return order.indexOf(phase) > order.indexOf(stepEnd)
+}
+
+const RELAX_FIELDS = [
+  { id: 'budgetMax', label: '预算上限' },
+  { id: 'budgetMin', label: '预算下限' },
+  { id: 'preferredBrands', label: '品牌' },
+  { id: 'requiredAttributes', label: '规格' },
+  { id: 'deliveryBy', label: '送达时间' },
+  { id: 'quantity', label: '数量' },
+  { id: 'query', label: '搜索词' },
+] as const
+
+function RelaxForm({ runId, busy, act }: {
+  runId: string
+  busy: boolean
+  act: (action: () => Promise<CommandAccepted>) => void
+}) {
+  const [relaxation, setRelaxation] = useState('')
+  const [fields, setFields] = useState<string[]>([])
+  const toggle = (id: string) => setFields((current) =>
+    current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+  return (
+    <form className="clarification" onSubmit={(event) => {
+      event.preventDefault()
+      if (relaxation.trim() && fields.length > 0) {
+        act(() => relaxConstraints(runId, relaxation.trim(), fields))
+      }
+    }}>
+      <h2>当前硬性条件下没有合适商品</h2>
+      <p>先勾选允许改的条件，再写具体要求。没勾选的字段不会动。</p>
+      <div className="address-row">
+        {RELAX_FIELDS.map((field) => (
+          <label key={field.id}>
+            <input type="checkbox" checked={fields.includes(field.id)}
+                   onChange={() => toggle(field.id)} /> {field.label}
+          </label>
+        ))}
+      </div>
+      <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
+                onChange={(event) => setRelaxation(event.target.value)} />
+      <button disabled={busy || !relaxation.trim() || fields.length === 0}>批准这些条件变更</button>
+      <button type="button" className="secondary" disabled={busy}
+              onClick={() => act(() => cancelRun(runId))}>不放宽，取消任务</button>
+    </form>
   )
 }
 
@@ -122,10 +248,9 @@ function RunView({ run, busy, act }: {
 }) {
   // UI 严格按照后端 phase 显示允许的动作，不能由前端跳过选品或快照确认。
   const [clarification, setClarification] = useState('')
-  const [relaxation, setRelaxation] = useState('')
   return (
     <section className="run">
-      <div className="status"><span />{run.phase}</div>
+      <p className="phase-copy">{phaseLabel(run.phase)}</p>
       {run.lastError && <p className="error">{run.lastError}</p>}
 
       {run.phase === 'NEEDS_CLARIFICATION' && (
@@ -137,7 +262,7 @@ function RunView({ run, busy, act }: {
           <p>{run.planSpec?.clarification?.question ?? '请补充缺少的购物条件。'}</p>
           <textarea value={clarification}
                     onChange={(event) => setClarification(event.target.value)} />
-          <button disabled={busy || !clarification.trim()}>继续</button>
+          <button disabled={busy || !clarification.trim()}>{busy ? '正在处理…' : '继续'}</button>
           <button type="button" className="secondary" disabled={busy}
                   onClick={() => act(() => cancelRun(run.runId))}>取消任务</button>
         </form>
@@ -165,19 +290,21 @@ function RunView({ run, busy, act }: {
         </div>
       )}
 
+      {run.phase === 'PREPARING_CONFIRMABLE_ORDER' && run.selectedCandidateIndex >= 0
+        && run.selectedCandidateIndex < run.candidateSet.length && (
+        <article className="snapshot">
+          <h2>正在锁定库存并生成确认快照</h2>
+          <p>如果上一次调用因网络或 Commerce 协议错误中断，可以安全重试；后端会复用同一个
+            effectId，不会重复预占库存。</p>
+          <button disabled={busy} onClick={() => act(() => selectCandidate(
+            run.runId, run.candidateSet[run.selectedCandidateIndex].skuId))}>
+            {busy ? '正在处理…' : '重试锁定库存'}
+          </button>
+        </article>
+      )}
+
       {run.phase === 'NEEDS_CONSTRAINT_RELAXATION' && (
-        <form className="clarification" onSubmit={(event) => {
-          event.preventDefault()
-          if (relaxation.trim()) act(() => relaxConstraints(run.runId, relaxation.trim()))
-        }}>
-          <h2>当前硬性条件下没有合适商品</h2>
-          <p>只有你明确说明允许修改哪些条件后，Agent 才会重新搜索。</p>
-          <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
-                    onChange={(event) => setRelaxation(event.target.value)} />
-          <button disabled={busy || !relaxation.trim()}>批准这些条件变更</button>
-          <button type="button" className="secondary" disabled={busy}
-                  onClick={() => act(() => cancelRun(run.runId))}>不放宽，取消任务</button>
-        </form>
+        <RelaxForm runId={run.runId} busy={busy} act={act} />
       )}
 
       {run.phase === 'WAITING_APPROVAL' && run.confirmableSnapshot && (
@@ -190,6 +317,8 @@ function RunView({ run, busy, act }: {
           <p>运费：¥{run.confirmableSnapshot.quote.shippingFee.amount}</p>
           <div><span>最终应付</span><strong>¥{run.confirmableSnapshot.quote.payableAmount.amount}</strong></div>
           <p>预计 {run.confirmableSnapshot.quote.deliveryPromise} 送达</p>
+          {run.confirmableSnapshot.quote.observedAt &&
+            <p>价格查询于 {new Date(run.confirmableSnapshot.quote.observedAt).toLocaleString()}</p>}
           <p>库存已临时锁定至 {new Date(run.confirmableSnapshot.expiresAt).toLocaleTimeString()}</p>
           <div className="actions">
             <button className="secondary" disabled={busy} onClick={() => act(() => decide(run, 'REJECT'))}>取消</button>

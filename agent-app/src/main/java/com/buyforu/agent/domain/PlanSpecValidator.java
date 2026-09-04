@@ -14,7 +14,7 @@ public final class PlanSpecValidator {
     private static final int MAX_LIST_ITEMS = 20;
     private static final EnumSet<PlanSpec.ReadTask> ALLOWED = EnumSet.allOf(PlanSpec.ReadTask.class);
     private static final java.util.Set<String> CLARIFIABLE_FIELDS = java.util.Set.of(
-            "query", "category", "budgetMax", "preferredBrands", "excludedBrands",
+            "query", "category", "budgetMax", "budgetMin", "preferredBrands", "excludedBrands",
             "requiredAttributes", "quantity", "addressId", "deliveryBy");
 
     public PlanSpec validate(PlanSpec plan) {
@@ -53,6 +53,12 @@ public final class PlanSpecValidator {
         }
         if (plan.normalizedConstraints().version() < 1) {
             throw new IllegalArgumentException("constraint version must be positive");
+        }
+        var budgetMin = plan.normalizedConstraints().budgetMin();
+        var budgetMax = plan.normalizedConstraints().budgetMax();
+        if (budgetMin != null && budgetMax != null
+                && budgetMin.amount().compareTo(budgetMax.amount()) > 0) {
+            throw new IllegalArgumentException("budgetMin cannot exceed budgetMax");
         }
         int quantity = plan.normalizedConstraints().quantity();
         if (!plan.clarification().required() && (quantity <= 0 || quantity > 99)) {

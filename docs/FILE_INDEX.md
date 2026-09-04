@@ -8,6 +8,8 @@
 | --- | --- | --- |
 | `pom.xml` | Maven 聚合与版本管理 | 文件内部有 XML 注释 |
 | `docker-compose.yml` | 本地 PostgreSQL、Redis、Keycloak、Ollama | 不启动 Java 和 Web 应用 |
+| `docs/PROJECT_DESIGN.md` | 总体需求设计、模块边界、完整链路、高并发设计、运行验收与面试问答 | 按大需求组织，基线以当前工作区实际代码为准 |
+| `docs/CORRECTNESS_REVIEW_FIXES.md` | 从初始需求到 Review、Bug 修复和验证的演进记录 | 记录失败场景、不变量、修复方式和明确未实现范围 |
 | `.env.example` | 本地服务端环境变量模板 | 真实 `.env` 被 Git 忽略 |
 | `.gitignore` | 排除密钥、IDE、构建产物 | 规则本身即说明排除对象 |
 | `mvnw` / `mvnw.cmd` | Maven Wrapper 生成脚本 | 第三方生成文件，不手工插入业务注释 |
@@ -24,6 +26,11 @@
 | `web/package-lock.json` | npm 自动生成的精确依赖锁，不手工编辑 |
 | `web/tsconfig.json` | TypeScript 严格模式、ES2022、Bundler 和 React JSX 配置 |
 | `web/tsconfig.tsbuildinfo` | TypeScript 自动生成的增量编译缓存，可删除重建 |
+| `scripts/accept.sh` | 本地一键验收 |
+| `scripts/k6/` | 公平队列 / SSE / 读路径压测脚本 |
+| `eval/rag/golden-set.json` | RAG 检索评估集，不是生产语料 |
+| `Dockerfile.agent` / `Dockerfile.commerce` / `Dockerfile.web` | 运行镜像 |
+| `.github/workflows/ci.yml` | 单测、集成测试、前端构建 |
 
 ## Agent 生产源码
 
@@ -37,6 +44,8 @@
 | `concurrency/RedisAdmissionController.java` | 分布式 Token Bucket 限流 |
 | `concurrency/RedisFairQueue.java` | 用户等权虚拟时间队列 |
 | `concurrency/DependencyExecutor.java` | 下游线程池、Bulkhead、超时与熔断 |
+| `concurrency/InFlightCallRegistry.java` | 记下命令正在等待的下游 Future，取消时 cancel(true) |
+| `config/SchedulingConfiguration.java` | dispatch / 租约心跳 / 维护任务分线程池 |
 | `concurrency/RunLeaseRepository.java` | execution epoch 栅栏和崩溃租约恢复 |
 | `application/GraphShoppingWorkflow.java` | 固定图启动、命令幂等和恢复门面 |
 | `application/FixedShoppingGraph.java` | LangGraph4j 固定拓扑和人工中断点 |

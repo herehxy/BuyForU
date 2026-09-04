@@ -14,6 +14,10 @@ spring:
         options:
           model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
           temperature: 0
+          # V4 默认 thinking=high。规划只要 PlanSpec JSON，必须关掉，否则会超过 45 秒硬超时。
+          extra-body:
+            thinking:
+              type: disabled
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       embedding:
@@ -38,6 +42,8 @@ spring:
     username: ${DB_USER:buyforu}
     password: ${DB_PASSWORD:buyforu}
     hikari:
+      # pgvector 装在 agent_schema，连接必须能解析 vector 类型。
+      connection-init-sql: SET search_path TO agent_schema, public
       # 网络等待不持有数据库连接，因此连接池按短事务吞吐配置而非 LLM 并发配置。
       maximum-pool-size: ${AGENT_DB_MAX_POOL_SIZE:12}
       minimum-idle: ${AGENT_DB_MIN_IDLE:2}
@@ -62,6 +68,8 @@ spring:
 buyforu:
   security:
     audience: ${OIDC_AUDIENCE:buyforu-api}
+    # 逗号分隔的精确代理地址；未列入的来源即使携带 X-Forwarded-For 也不会被信任。
+    trusted-proxies: ${TRUSTED_PROXY_ADDRESSES:}
   mcp:
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
   concurrency:
