@@ -2,6 +2,7 @@ package com.buyforu.commerce.infrastructure;
 
 import com.buyforu.commerce.application.DomainEventPublisher;
 import com.buyforu.commerce.application.DomainEventPublisher.DomainEvent;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -15,6 +16,9 @@ import java.util.UUID;
 /**
  * 先短事务把事件标成 CLAIMED，提交后再发 HTTP。
  * 这样 Webhook 卡住时不会握着 outbox 行锁和数据库连接。
+ *
+ * <p>投递与 CLAIMED 回收跑在两套独立调度器上：投递是"一次跑完整个积压才返回"的循环，
+ * 回收只是两条 UPDATE，让它们共用单线程会让回收被积压饿死。</p>
  */
 @Component
 public class OutboxDispatcher {
@@ -23,20 +27,34 @@ public class OutboxDispatcher {
     private final TransactionTemplate transactions;
     private final DomainEventPublisher publisher;
     private final String instanceId;
+    private final int maxPerCycle;
+    private final MeterRegistry meters;
 
     public OutboxDispatcher(JdbcTemplate jdbc, TransactionTemplate transactions, DomainEventPublisher publisher,
-                            @Value("${buyforu.events.instance-id:}") String configuredInstanceId) {
+                            @Value("${buyforu.events.instance-id:}") String configuredInstanceId,
+                            @Value("${buyforu.outbox.max-per-cycle:100}") int maxPerCycle,
+                            MeterRegistry meters) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.publisher = publisher;
         // 未配置时每次启动一个随机 ID，避免多实例都写成 buyforu-commerce-local。
         this.instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
                 ? UUID.randomUUID().toString() : configuredInstanceId;
+        this.maxPerCycle = maxPerCycle;
+        this.meters = meters;
     }
 
+    /**
+     * 单周期最多投递 {@code buyforu.outbox.max-per-cycle} 条。
+     *
+     * <p>没有上限时，一次大积压（对端宕机恢复后的补投）会让这个循环长时间占着调度线程：
+     * 固定延迟的下一轮排不上，Webhook 慢的时候更明显；停机时也不能及时收尾。
+     * 触顶次数单独计数——它不是错误，但持续增长说明积压追不上来。</p>
+     */
     @Scheduled(fixedDelayString = "${buyforu.outbox.poll-delay:PT1S}", scheduler = "outboxScheduler")
     public void dispatch() {
-        while (true) {
+        int published = 0;
+        while (published < maxPerCycle) {
             OutboxRow row = transactions.execute(status -> claimOne());
             if (row == null) return;
             try {
@@ -47,11 +65,13 @@ public class OutboxDispatcher {
                 transactions.executeWithoutResult(status -> markRetry(row, failure));
                 return;
             }
+            published++;
         }
+        meters.counter("buyforu_outbox_cycle_capped_total").increment();
     }
 
     /** 认领后进程死了，60 秒后把 CLAIMED 打回 PENDING，不增加 attempts。 */
-    @Scheduled(fixedDelayString = "${buyforu.outbox.reclaim-delay:PT30S}", scheduler = "outboxScheduler")
+    @Scheduled(fixedDelayString = "${buyforu.outbox.reclaim-delay:PT30S}", scheduler = "outboxReclaimScheduler")
     public void reclaimStaleClaims() {
         transactions.executeWithoutResult(status -> jdbc.update("""
                 UPDATE commerce_schema.outbox_event
