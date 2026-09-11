@@ -177,15 +177,28 @@ public class CommandRepository {
                 """, code, commandId);
     }
 
-    public List<AgentCommand> recentlyRecovered(int withinSeconds) {
+    /**
+     * 租约已失效、但仍停在 RUNNING 的命令——也就是 {@code RunLeaseRepository.recoverExpired}
+     * 即将翻成 RETRY_WAIT / EXPIRED 的那一批。
+     *
+     * <p>判据必须与 recoverExpired 第二条条件更新保持一致。那里是
+     * {@code status='RUNNING' AND NOT EXISTS (活跃租约)}；第一条更新（活跃租约已过期）是它的子集，
+     * 所以这里的并集正好化简成同一个判据，不必把两条 SQL 的谓词再抄一遍。</p>
+     *
+     * <p>调用方用它来"先放用户许可、后翻状态"。候选集合允许比实际恢复范围更宽
+     * （多放一个许可只让同一用户的另一条命令更早开始），但不能更窄。</p>
+     */
+    public List<AgentCommand> recoverableCommands(int limit) {
         return jdbc.query("""
-                SELECT * FROM agent_schema.agent_command
-                WHERE error_code IN ('WORKER_LEASE_EXPIRED','ORPHAN_RUNNING_COMMAND','COMMAND_RECOVERY_EXHAUSTED')
-                  AND (
-                    (status='RETRY_WAIT' AND available_at>=now() - (? * interval '1 second'))
-                    OR (status IN ('EXPIRED','FAILED') AND completed_at>=now() - (? * interval '1 second'))
+                SELECT * FROM agent_schema.agent_command c
+                WHERE c.status='RUNNING'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_schema.agent_run_execution x
+                      WHERE x.active_command_id=c.command_id AND x.lease_until>now()
                   )
-                """, (rs, row) -> map(rs), withinSeconds, withinSeconds);
+                ORDER BY c.created_at
+                LIMIT ?
+                """, (rs, row) -> map(rs), limit);
     }
 
     public int retryLater(UUID commandId, Instant availableAt, String code, String detail) {
