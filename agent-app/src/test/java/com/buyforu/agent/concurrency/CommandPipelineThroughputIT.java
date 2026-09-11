@@ -164,7 +164,9 @@ class CommandPipelineThroughputIT {
         ObjectMapper objectMapper() { return new ObjectMapper(); }
 
         @Bean
-        InFlightCallRegistry inFlightCallRegistry() { return new InFlightCallRegistry(); }
+        InFlightCallRegistry inFlightCallRegistry(io.micrometer.core.instrument.MeterRegistry meters) {
+            return new InFlightCallRegistry(meters);
+        }
 
         /** 业务图替身：立即返回完成态，使整条治理链路不依赖 LLM 即可驱动。 */
         @Bean
@@ -182,8 +184,9 @@ class CommandPipelineThroughputIT {
         @Bean
         CommandService commandService(CommandRepository commands, RedisAdmissionController admission,
                                       RedisFairQueue fairQueue, RunEventRepository events,
-                                      RunLeaseRepository leases, ObjectMapper json) {
-            return new CommandService(commands, admission, fairQueue, events, leases, json);
+                                      RunLeaseRepository leases, ObjectMapper json,
+                                      io.micrometer.core.instrument.MeterRegistry meters) {
+            return new CommandService(commands, admission, fairQueue, events, leases, json, meters);
         }
 
         @Bean
