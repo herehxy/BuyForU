@@ -113,29 +113,49 @@ public class CommandRepository {
                 """, (rs, row) -> map(rs), limit);
     }
 
-    public void markSucceeded(UUID commandId, CommandStatus status, Long stateVersion) {
-        jdbc.update("""
+    // 终态迁移一律返回影响行数。这些 SQL 都带状态前置条件，命中 0 行意味着命令已被
+    // 别的路径改写（租约恢复、取消、更早的失败），调用方据此决定还要不要对外发终态事件。
+
+    public int markSucceeded(UUID commandId, CommandStatus status, Long stateVersion) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status=?,result_state_version=?,completed_at=now(),
                     error_code=NULL,error_detail=NULL WHERE command_id=? AND status='RUNNING'
                 """, status.name(), stateVersion, commandId);
     }
 
-    public void markFailed(UUID commandId, String code, String detail) {
-        jdbc.update("""
+    public int markFailed(UUID commandId, String code, String detail) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,error_detail=?,completed_at=now()
                 WHERE command_id=? AND status='RUNNING'
                 """, code, truncate(detail), commandId);
     }
 
-    public void markExpired(UUID commandId) {
-        jdbc.update("""
+    /**
+     * 栅栏拒绝专用：只终止"仍属于自己这个 epoch"的 RUNNING 命令。
+     *
+     * <p>{@code StaleExecution} 的含义是"本执行实例失去了写权限"，而不是"命令已经结束"。
+     * 命令很可能已被更高 epoch 的实例接管并正在执行——此时若无条件 {@code markFailed}，
+     * 输家会把赢家正在跑的 RUNNING 直接判死，赢家稍后的完成迁移再命中 0 行，
+     * 结果是一条已经产生副作用的命令以 STALE_EXECUTION 收尾，且拿不到自己的终态事件。</p>
+     *
+     * <p>epoch 传 null 时退化为不校验 epoch，仅用于调用方拿不到租约的兜底路径。</p>
+     */
+    public int markFencedOut(UUID commandId, Long staleEpoch, String code, String detail) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,error_detail=?,completed_at=now()
+                WHERE command_id=? AND status='RUNNING' AND (?::bigint IS NULL OR execution_epoch=?)
+                """, code, truncate(detail), commandId, staleEpoch, staleEpoch);
+    }
+
+    public int markExpired(UUID commandId) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='EXPIRED',error_code='COMMAND_DEADLINE_EXCEEDED',
                     completed_at=now() WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT')
                 """, commandId);
     }
 
-    public void markAdmissionRejected(UUID commandId, String code) {
-        jdbc.update("""
+    public int markAdmissionRejected(UUID commandId, String code) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,completed_at=now()
                 WHERE command_id=? AND status='QUEUED'
                 """, code, commandId);
@@ -150,8 +170,8 @@ public class CommandRepository {
                 """, runId);
     }
 
-    public void markCancelled(UUID commandId, String code) {
-        jdbc.update("""
+    public int markCancelled(UUID commandId, String code) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='CANCELLED',error_code=?,completed_at=now()
                 WHERE command_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT')
                 """, code, commandId);
@@ -168,8 +188,8 @@ public class CommandRepository {
                 """, (rs, row) -> map(rs), withinSeconds, withinSeconds);
     }
 
-    public void retryLater(UUID commandId, Instant availableAt, String code, String detail) {
-        jdbc.update("""
+    public int retryLater(UUID commandId, Instant availableAt, String code, String detail) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='RETRY_WAIT',available_at=?,error_code=?,error_detail=?
                 WHERE command_id=? AND status='RUNNING'
                 """, Timestamp.from(availableAt), code, truncate(detail), commandId);
