@@ -1,5 +1,6 @@
 package com.buyforu.commerce.application;
 
+import com.buyforu.commerce.port.CatalogAttributeNormalizer;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 
@@ -66,6 +67,26 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    public List<InventoryItem> listInventory() {
+        expireReservations();
+        return catalog.values().stream()
+                .sorted(Comparator.comparing(CatalogItem::category).thenComparing(CatalogItem::unitPrice)
+                        .thenComparing(CatalogItem::skuId))
+                .map(item -> new InventoryItem(item.skuId(), item.name(), item.brand(), item.category(),
+                        new Money(item.unitPrice(), "CNY"), inventory.getOrDefault(item.skuId(), 0),
+                        reservedQuantity(item.skuId())))
+                .toList();
+    }
+
+    private int reservedQuantity(String skuId) {
+        return reservations.values().stream()
+                .filter(reservation -> reservation.skuId().equals(skuId)
+                        && reservation.status() == ReservationStatus.ACTIVE)
+                .mapToInt(Reservation::quantity)
+                .sum();
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         String q = request.query() == null ? "" : request.query().toLowerCase();
         List<ProductCandidate> matches = catalog.values().stream()
@@ -74,10 +95,16 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 .filter(item -> q.isBlank() || item.name().toLowerCase().contains(q)
                         || item.category().toLowerCase().contains(q))
                 .filter(item -> request.excludedBrands().stream().noneMatch(b -> b.equalsIgnoreCase(item.brand())))
-                .filter(item -> request.requiredAttributes().entrySet().stream()
+                .filter(item -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
+                        .entrySet().stream()
                         .allMatch(e -> e.getValue().equalsIgnoreCase(item.attributes().get(e.getKey()))))
-                .filter(item -> request.budgetMax() == null
-                        || item.unitPrice().compareTo(request.budgetMax().amount()) <= 0)
+                .filter(item -> {
+                    var payableAmount = payable(item.unitPrice(), request.quantity());
+                    if (request.budgetMax() != null && payableAmount.compareTo(request.budgetMax().amount()) > 0) {
+                        return false;
+                    }
+                    return request.budgetMin() == null || payableAmount.compareTo(request.budgetMin().amount()) >= 0;
+                })
                 .sorted(Comparator.comparing(CatalogItem::unitPrice))
                 .limit(request.limit())
                 .map(item -> new ProductCandidate(item.productId(), item.skuId(), item.name(), item.brand(),
@@ -91,18 +118,10 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     public Quote quote(QuoteRequest request) {
         CatalogItem item = requireItem(request.skuId());
         Instant now = clock.instant();
-        BigDecimal itemAmount = item.unitPrice().multiply(BigDecimal.valueOf(request.quantity()));
-        List<DiscountLine> discounts = new ArrayList<>();
-        BigDecimal discount = BigDecimal.ZERO;
-        if (itemAmount.compareTo(new BigDecimal("5000")) >= 0) {
-            discount = new BigDecimal("200.00");
-            discounts.add(new DiscountLine("FULL_5000_200", "满 5000 减 200", new Money(discount, "CNY")));
-        }
-        BigDecimal shipping = itemAmount.compareTo(new BigDecimal("99")) >= 0
-                ? BigDecimal.ZERO : new BigDecimal("10.00");
+        PricedItems priced = priceItems(item.unitPrice(), request.quantity());
         return new Quote(UUID.randomUUID().toString(), quoteVersion.incrementAndGet(), request.skuId(), request.quantity(),
-                new Money(itemAmount, "CNY"), discounts, new Money(shipping, "CNY"),
-                new Money(itemAmount.subtract(discount).add(shipping), "CNY"),
+                new Money(priced.itemAmount(), "CNY"), priced.discounts(), new Money(priced.shipping(), "CNY"),
+                new Money(priced.payable(), "CNY"),
                 LocalDate.now(clock).plusDays(1), now, now.plus(QUOTE_TTL));
     }
 
@@ -115,11 +134,23 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     public synchronized ConfirmableOrderSnapshot prepareConfirmableOrder(
             PrepareOrderRequest request, EffectContext effectContext) {
         String requestHash = hash("prepare", request.userId(), request.skuId(), String.valueOf(request.quantity()),
-                request.addressId());
+                request.addressId(), budgetKey(request.budgetMax()), budgetKey(request.budgetMin()));
         return effectLedger.execute(effectContext, "PREPARE_CONFIRMABLE_ORDER", requestHash, () -> {
             expireReservations();
             requireAvailable(request.skuId(), request.quantity());
             Quote quote = quote(new QuoteRequest(request.skuId(), request.quantity(), request.userId(), request.addressId()));
+            if (request.budgetMax() != null
+                    && quote.payableAmount().amount().compareTo(request.budgetMax().amount()) > 0) {
+                throw new CommerceException("BUDGET_EXCEEDED",
+                        "payable " + quote.payableAmount().amount() + " exceeds budget "
+                                + request.budgetMax().amount());
+            }
+            if (request.budgetMin() != null
+                    && quote.payableAmount().amount().compareTo(request.budgetMin().amount()) < 0) {
+                throw new CommerceException("BUDGET_BELOW_MINIMUM",
+                        "payable " + quote.payableAmount().amount() + " is below budget floor "
+                                + request.budgetMin().amount());
+            }
             inventory.compute(request.skuId(), (ignored, stock) -> stock - request.quantity());
             Instant now = clock.instant();
             Reservation reservation = new Reservation(UUID.randomUUID().toString(), request.skuId(), request.quantity(),
@@ -171,6 +202,17 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
             orders.put(order.orderId(), order);
             return order;
         });
+    }
+
+    @Override
+    public synchronized java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        ConfirmableOrderSnapshot snapshot = requireSnapshot(snapshotId);
+        if (!snapshot.userId().equals(userId)) {
+            throw new CommerceException("SNAPSHOT_USER_MISMATCH", "snapshot belongs to another user");
+        }
+        return orders.values().stream()
+                .filter(order -> order.userId().equals(userId) && order.sourceSnapshotId().equals(snapshotId))
+                .findFirst();
     }
 
     public int availableStock(String skuId) {
@@ -248,6 +290,10 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 quote.deliveryPromise().toString(), reservation.reservationId(), expiresAt.toString());
     }
 
+    private static String budgetKey(Money budgetMax) {
+        return budgetMax == null ? "" : budgetMax.amount().toPlainString() + "\u001f" + budgetMax.currency();
+    }
+
     private static String hash(String... values) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -260,6 +306,26 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     private static Instant min(Instant left, Instant right) {
         return left.isBefore(right) ? left : right;
     }
+
+    private PricedItems priceItems(BigDecimal unitPrice, int quantity) {
+        BigDecimal itemAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
+        List<DiscountLine> discounts = new ArrayList<>();
+        BigDecimal discount = BigDecimal.ZERO;
+        if (itemAmount.compareTo(new BigDecimal("5000")) >= 0) {
+            discount = new BigDecimal("200.00");
+            discounts.add(new DiscountLine("FULL_5000_200", "满 5000 减 200", new Money(discount, "CNY")));
+        }
+        BigDecimal shipping = itemAmount.compareTo(new BigDecimal("99")) >= 0
+                ? BigDecimal.ZERO : new BigDecimal("10.00");
+        return new PricedItems(itemAmount, discounts, shipping, itemAmount.subtract(discount).add(shipping));
+    }
+
+    private BigDecimal payable(BigDecimal unitPrice, int quantity) {
+        return priceItems(unitPrice, quantity).payable();
+    }
+
+    private record PricedItems(BigDecimal itemAmount, List<DiscountLine> discounts,
+                               BigDecimal shipping, BigDecimal payable) { }
 
     public record CatalogItem(String productId, String skuId, String name, String brand, String category,
                               Map<String, String> attributes, BigDecimal unitPrice, int initialStock) {

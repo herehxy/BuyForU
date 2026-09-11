@@ -10,5 +10,6 @@ Flyway 会保存每个已执行版本的 checksum。即使只给历史 SQL 添�
 | `V4__durable_versions_and_expiry.sql` | 报价/快照数据库序列、预占过期索引和 Outbox 重试字段 | 版本不依赖单机内存；事件支持退避、错误和发布时间 |
 | `V5__address_created_at.sql` | 地址创建时间及最近地址索引 | 用于刷新页面时恢复用户最近使用的地址 |
 | `V6__pricing_rules_and_address_identity.sql` | 促销、运费规则和活动地址唯一语义 | 金额规则进入 Commerce 数据库；同一用户和区域只保留一个活动地址 |
+| `V7__outbox_claim_and_effect_lease.sql` | Outbox 认领字段和 effect updated_at | 先 CLAIMED 再发 HTTP，避免事务里打网 |
 
 修改交易表只能增加新版本迁移，严禁回改已发布脚本或手工修改生产 Schema。

@@ -1,0 +1,18 @@
+FROM node:20-alpine AS build
+WORKDIR /web
+ARG VITE_OIDC_AUTHORITY
+ARG VITE_OIDC_CLIENT_ID=buyforu-web
+ENV VITE_OIDC_AUTHORITY=$VITE_OIDC_AUTHORITY
+ENV VITE_OIDC_CLIENT_ID=$VITE_OIDC_CLIENT_ID
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY --from=build /web/dist /usr/share/nginx/html
+COPY infra/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+# 本地单独运行 Web 容器时访问宿主机 Agent；生产环境通过 AGENT_UPSTREAM 覆盖。
+ENV AGENT_UPSTREAM=http://host.docker.internal:8080
+ENV NGINX_ENVSUBST_FILTER=AGENT_UPSTREAM
+EXPOSE 80

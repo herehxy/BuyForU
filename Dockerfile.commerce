@@ -1,0 +1,6 @@
+# Commerce 运行镜像。先在仓库根目录执行 ./mvnw -pl commerce-service -am package
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY commerce-service/target/commerce-service-0.1.0-SNAPSHOT.jar app.jar
+EXPOSE 8081
+ENTRYPOINT ["java","-jar","/app/app.jar"]

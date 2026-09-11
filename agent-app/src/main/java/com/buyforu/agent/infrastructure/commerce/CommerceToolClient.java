@@ -6,6 +6,8 @@ import com.buyforu.commerce.port.model.CommerceModels.*;
 public interface CommerceToolClient {
     java.util.List<DeliveryAddress> addressList(String userId);
 
+    java.util.List<InventoryItem> inventoryList();
+
     SearchResult catalogSearch(SearchRequest request);
 
     Quote quoteCalculate(QuoteRequest request);
@@ -17,4 +19,6 @@ public interface CommerceToolClient {
     void inventoryRelease(String reservationId, EffectContext effect);
 
     Order orderCreate(CreateOrderCommand command, EffectContext effect);
+
+    java.util.Optional<Order> orderFindBySnapshot(String userId, String snapshotId);
 }

@@ -6,6 +6,7 @@ public final class CommandExceptions {
 
     public static final class IdempotencyConflict extends RuntimeException {
         public IdempotencyConflict() { super("Idempotency-Key was reused with a different request"); }
+        public IdempotencyConflict(String message) { super(message); }
     }
 
     public static final class AdmissionRejected extends RuntimeException {

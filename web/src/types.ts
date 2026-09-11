@@ -24,6 +24,7 @@ export type Snapshot = {
     payableAmount: Money
     shippingFee: Money
     deliveryPromise: string
+    observedAt?: string
     discounts: Array<{ code: string; description: string; amount: Money }>
   }
   reservation: { reservationId: string; status: string; expiresAt: string }

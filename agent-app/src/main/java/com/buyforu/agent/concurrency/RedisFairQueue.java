@@ -30,6 +30,20 @@ public class RedisFairQueue {
             if redis.call('LLEN',listKey)>0 then redis.call('ZADD',KEYS[1],score,user) else redis.call('ZREM',KEYS[1],user); redis.call('DEL',listKey); end
             return command
             """, String.class);
+    // 抢不到执行许可时塞回队头，该用户内部仍是 FIFO。
+    private static final DefaultRedisScript<Long> ENQUEUE_FRONT = new DefaultRedisScript<>("""
+            if redis.call('SISMEMBER',KEYS[3],ARGV[2])==1 then return 2 end
+            local total=tonumber(redis.call('GET',KEYS[4]) or '0'); if total>=tonumber(ARGV[3]) then return -1 end
+            local userCount=redis.call('LLEN',KEYS[2]); if userCount>=tonumber(ARGV[4]) then return -2 end
+            redis.call('LPUSH',KEYS[2],ARGV[2]); redis.call('SADD',KEYS[3],ARGV[2]); redis.call('INCR',KEYS[4]);
+            if userCount==0 then local vt=tonumber(redis.call('GET',KEYS[5]) or '0'); redis.call('ZADD',KEYS[1],'NX',vt,ARGV[1]); end
+            return 1
+            """, Long.class);
+    // GET 和 DEL 必须在同一段 Lua 里，否则两个命令交叉释放会删掉别人的许可。
+    private static final DefaultRedisScript<Long> RELEASE_PERMIT = new DefaultRedisScript<>("""
+            if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end
+            return 0
+            """, Long.class);
 
     private final StringRedisTemplate redis;
     private final ConcurrencyProperties properties;
@@ -46,10 +60,19 @@ public class RedisFairQueue {
     }
 
     public void enqueue(AgentCommand command) {
+        push(command, ENQUEUE);
+    }
+
+    /** 刚 poll 出来又抢不到许可，放回队头，不要掉到队尾。 */
+    public void enqueueFront(AgentCommand command) {
+        push(command, ENQUEUE_FRONT);
+    }
+
+    private void push(AgentCommand command, DefaultRedisScript<Long> script) {
         String lane = command.queueClass().name().toLowerCase();
         int capacity = command.queueClass() == AgentCommand.QueueClass.PLANNING
                 ? properties.planningQueueCapacity() : properties.transactionQueueCapacity();
-        Long result = redis.execute(ENQUEUE, List.of(active(lane), userList(lane, command.userId()), indexed(lane),
+        Long result = redis.execute(script, List.of(active(lane), userList(lane, command.userId()), indexed(lane),
                         depth(lane), virtualTime(lane)), command.userId(), command.commandId().toString(),
                 String.valueOf(capacity), String.valueOf(properties.perUserQueueCapacity()));
         if (Long.valueOf(-1).equals(result)) throw new CommandExceptions.AdmissionRejected("queue is full", 10);
@@ -63,16 +86,14 @@ public class RedisFairQueue {
         return value == null ? null : UUID.fromString(value);
     }
 
-    /** 分布式用户执行许可，防止同一用户的不同 run 同时占用多个昂贵下游槽位。 */
+    /** 同一用户同时只跑一条命令。TTL 覆盖规划上限（210 秒），崩溃后最多堵 240 秒，不做心跳续期。 */
     public boolean tryAcquireUser(String userId, UUID commandId) {
         return Boolean.TRUE.equals(redis.opsForValue().setIfAbsent("{buyforu}:running:user:" + userId,
-                commandId.toString(), Duration.ofSeconds(300)));
+                commandId.toString(), Duration.ofSeconds(240)));
     }
 
     public void releaseUser(String userId, UUID commandId) {
-        String key = "{buyforu}:running:user:" + userId;
-        String owner = redis.opsForValue().get(key);
-        if (commandId.toString().equals(owner)) redis.delete(key);
+        redis.execute(RELEASE_PERMIT, List.of("{buyforu}:running:user:" + userId), commandId.toString());
     }
 
     private static String active(String lane) { return "{buyforu}:queue:" + lane + ":active-users"; }
