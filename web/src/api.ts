@@ -89,6 +89,10 @@ function command(path: string, op: string, fingerprint: string, body?: unknown):
 
 const ACTIVE_COMMAND_KEY = 'buyforu:active-command'
 
+// 必须显著大于服务端心跳间隔（RunEventController 当前 10 秒），否则健康的长连接会被
+// 误判成"开发代理缓冲了 SSE"并永久降级到轮询。两个常量相等时每次心跳都在和超时赛跑。
+const SSE_READ_TIMEOUT_MS = 25_000
+
 function finishIdempotencySlot(commandId: string, allowNewAttempt: boolean): void {
   const commandSlot = `buyforu:command-slot:${commandId}`
   const slot = sessionStorage.getItem(commandSlot)
@@ -207,17 +211,26 @@ export async function followRun(
     let buffer = ''
     while (Date.now() < deadline) {
       let read: ReadableStreamReadResult<Uint8Array> | undefined
+      // 超时定时器必须在每次循环结束时清掉：一个连接可能收到成百上千条事件，
+      // 留着定时器会让它们一路积到 25 秒后才触发。
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
       try {
-        read = await Promise.race([
-          reader.read(),
-          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 15_000)),
-        ])
+        const idle = new Promise<undefined>((resolve) => {
+          idleTimer = setTimeout(() => resolve(undefined), SSE_READ_TIMEOUT_MS)
+        })
+        const pending = reader.read()
+        // 超时后这次 read 仍挂在 reader 上，reader.cancel() 会让它 reject；
+        // 先挂兜底处理器，避免控制台出现 unhandled rejection。
+        pending.catch(() => undefined)
+        read = await Promise.race([pending, idle])
       } catch {
         break
+      } finally {
+        if (idleTimer !== undefined) clearTimeout(idleTimer)
       }
       if (!read) break
-      if (read?.done) break
-      if (read?.value) {
+      if (read.done) break
+      if (read.value) {
         buffer += decoder.decode(read.value, { stream: true }).replace(/\r\n/g, '\n')
         const frames = buffer.split('\n\n')
         buffer = frames.pop() ?? ''

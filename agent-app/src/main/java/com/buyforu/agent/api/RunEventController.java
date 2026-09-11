@@ -27,6 +27,12 @@ import io.micrometer.core.instrument.MeterRegistry;
 @RestController
 @RequestMapping("/api/v1/runs")
 public class RunEventController {
+    /**
+     * 心跳间隔必须明显小于前端的 SSE 读超时，否则健康连接会被前端判成"代理缓冲了 SSE"
+     * 并永久降级到轮询。历史上这里和前端一样是 15 秒，两边相等会让每次心跳都与超时赛跑。
+     * 当前约定：服务端 10 秒心跳，前端 25 秒读超时。
+     */
+    private static final long HEARTBEAT_INTERVAL_MS = 10_000;
     private final RunEventRepository events;
     private final RunEventNotifier notifier;
     private final CommandService commands;
@@ -80,12 +86,12 @@ public class RunEventController {
                     cursor = event.eventId();
                 }
                 long now = System.currentTimeMillis();
-                if (now - lastHeartbeat >= 15_000) {
+                if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                     emitter.send(SseEmitter.event().name("heartbeat").data(Map.of("time", now)));
                     lastHeartbeat = now;
                 }
-                // 没有新事件时由本地/Redis 通知唤醒；15 秒超时只用于发送心跳。
-                if (batch.isEmpty()) notifier.await(runId, version, Duration.ofSeconds(15));
+                // 没有新事件时由本地/Redis 通知唤醒；心跳间隔一到就发一次保活帧。
+                if (batch.isEmpty()) notifier.await(runId, version, Duration.ofMillis(HEARTBEAT_INTERVAL_MS));
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt(); emitter.complete();
