@@ -235,30 +235,31 @@ public class CommandWorker {
             AgentCommand.CommandStatus terminal = result.phase() == ShoppingAgentState.Phase.CANCELLED
                     ? AgentCommand.CommandStatus.CANCELLED
                     : waiting(result) ? AgentCommand.CommandStatus.WAITING_USER : AgentCommand.CommandStatus.SUCCEEDED;
-            commands.markSucceeded(command.commandId(), terminal, execution.expectedStateVersion());
+            int transitioned = commands.markSucceeded(command.commandId(), terminal,
+                    execution.expectedStateVersion());
             String eventType = terminal == AgentCommand.CommandStatus.WAITING_USER ? "run.waiting-user"
                     : terminal == AgentCommand.CommandStatus.CANCELLED ? "command.cancelled" : "command.completed";
-            events.append(command.runId(), command.commandId(), eventType,
-                    Map.of("phase", result.phase().name()));
+            appendTerminalEvent(transitioned, command, eventType, Map.of("phase", result.phase().name()));
         } catch (RunLeaseRepository.ClaimConflict conflict) {
             log.debug("Command {} was already claimed", command.commandId());
         } catch (CommandExceptions.StaleExecution stale) {
             meters.counter("buyforu_fenced_write_rejected_total").increment();
-            // 栅栏拒绝意味着该 Worker 已失去写权限，不能让命令继续伪装成 RUNNING。
-            commands.markFailed(command.commandId(), "STALE_EXECUTION", "任务已被更新的执行实例接管");
-            events.append(command.runId(), command.commandId(), "command.failed",
-                    Map.of("code", "STALE_EXECUTION"));
+            // 栅栏拒绝只代表本实例失去写权限，命令可能已被更高 epoch 的实例接管并正在运行。
+            // 必须带上自己的 epoch 做条件更新，否则输家会把赢家正在跑的 RUNNING 判死。
+            // lease 为空时传 null，仓库侧退化为不校验 epoch（这条路径进不了 ExecutionContext，本就不存在被接管的可能）。
+            int fenced = commands.markFencedOut(command.commandId(), lease == null ? null : lease.epoch(),
+                    "STALE_EXECUTION", "任务已被更新的执行实例接管");
+            appendTerminalEvent(fenced, command, "command.failed", Map.of("code", "STALE_EXECUTION"));
             log.warn("Stale command {} was fenced", command.commandId());
         } catch (DependencyExecutor.DependencyTimeoutException | CallNotPermittedException
                  | BulkheadFullException transientFailure) {
             if (command.attempts() + 1 < 3 && command.deadlineAt().isAfter(Instant.now().plusSeconds(10))) {
-                commands.retryLater(command.commandId(), Instant.now().plusSeconds(10),
-                        "DEPENDENCY_RETRY_WAIT", safeMessage(transientFailure));
-                events.append(command.runId(), command.commandId(), "command.retry-wait",
+                appendTerminalEvent(commands.retryLater(command.commandId(), Instant.now().plusSeconds(10),
+                        "DEPENDENCY_RETRY_WAIT", safeMessage(transientFailure)), command, "command.retry-wait",
                         Map.of("availableAt", Instant.now().plusSeconds(10).toString()));
             } else {
-                commands.markFailed(command.commandId(), classify(transientFailure), safeMessage(transientFailure));
-                events.append(command.runId(), command.commandId(), "command.failed",
+                appendTerminalEvent(commands.markFailed(command.commandId(), classify(transientFailure),
+                        safeMessage(transientFailure)), command, "command.failed",
                         Map.of("code", classify(transientFailure)));
             }
         } catch (DependencyExecutor.DependencyInterruptedException interrupted) {
@@ -266,21 +267,20 @@ public class CommandWorker {
             // heartbeat 在"用户取消"和"期限届满"两种情况下都会 interrupt，此处把两者分开，
             // 否则都落成通用的 COMMAND_EXECUTION_FAILED，运维无法识别命令是被终止还是真的出错。
             if (lease != null && leases.cancellationRequested(lease)) {
-                commands.markCancelled(command.commandId(), "RUN_CANCEL_REQUESTED");
-                events.append(command.runId(), command.commandId(), "command.cancelled",
-                        Map.of("code", "RUN_CANCEL_REQUESTED"));
+                appendTerminalEvent(commands.markCancelled(command.commandId(), "RUN_CANCEL_REQUESTED"),
+                        command, "command.cancelled", Map.of("code", "RUN_CANCEL_REQUESTED"));
             } else {
-                commands.markFailed(command.commandId(), "COMMAND_DEADLINE_EXCEEDED", safeMessage(interrupted));
+                int failed = commands.markFailed(command.commandId(), "COMMAND_DEADLINE_EXCEEDED",
+                        safeMessage(interrupted));
                 meters.counter("buyforu_command_deadline_terminated_total",
                         "queue_class", command.queueClass().name()).increment();
-                events.append(command.runId(), command.commandId(), "command.failed",
+                appendTerminalEvent(failed, command, "command.failed",
                         Map.of("code", "COMMAND_DEADLINE_EXCEEDED"));
                 log.warn("Command {} exceeded its deadline and was terminated", command.commandId());
             }
         } catch (RuntimeException failure) {
-            commands.markFailed(command.commandId(), classify(failure), safeMessage(failure));
-            events.append(command.runId(), command.commandId(), "command.failed",
-                    Map.of("code", classify(failure)));
+            appendTerminalEvent(commands.markFailed(command.commandId(), classify(failure), safeMessage(failure)),
+                    command, "command.failed", Map.of("code", classify(failure)));
             log.error("Command {} failed", command.commandId(), failure);
         } finally {
             executionSample.stop(Timer.builder("buyforu_command_execution_seconds")
@@ -293,6 +293,25 @@ public class CommandWorker {
             }
             permit.release();
         }
+    }
+
+    /**
+     * 只有真正完成状态迁移的那一次执行才有资格上报终止事件。
+     *
+     * <p>条件更新命中 0 行说明命令已被别的路径改写（租约恢复把 RUNNING 翻成 RETRY_WAIT / EXPIRED，
+     * 或另一实例已抢先给出终态）。此时再 append，SSE 上就会出现互相矛盾的终态：
+     * 客户端可能先收到 command.failed 再收到 command.completed，断线续传的客户端会照着错误的那条收尾。</p>
+     *
+     * <p>被抑制的次数单独计数，因为这是"竞态真的发生了"的唯一信号——静默丢弃会让这类问题无法被观测。</p>
+     */
+    private void appendTerminalEvent(int updatedRows, AgentCommand command, String eventType,
+                                     Map<String, Object> payload) {
+        if (updatedRows == 1) {
+            events.append(command.runId(), command.commandId(), eventType, payload);
+            return;
+        }
+        meters.counter("buyforu_terminal_event_suppressed_total", "event_type", eventType).increment();
+        log.info("Command {} is no longer RUNNING; suppressed its {} event", command.commandId(), eventType);
     }
 
     private ShoppingAgentState invoke(AgentCommand command) {
