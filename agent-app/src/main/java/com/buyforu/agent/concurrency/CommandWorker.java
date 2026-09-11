@@ -30,6 +30,8 @@ import com.buyforu.commerce.port.CommerceOperationException;
 @Component
 public class CommandWorker {
     private static final Logger log = LoggerFactory.getLogger(CommandWorker.class);
+    /** 恢复前一次性释放用户许可的候选上限；远超单实例在途命令数，正常情况就是"全放"。 */
+    private static final int RECOVERABLE_PERMIT_BATCH = 1000;
     private final CommandRepository commands;
     private final RunLeaseRepository leases;
     private final RedisFairQueue fairQueue;
@@ -142,18 +144,32 @@ public class CommandWorker {
         while (events.deleteOlderThan(Instant.now().minusSeconds(7 * 86400L), 1000) == 1000) { }
     }
 
+    /**
+     * 恢复顺序不能颠倒：必须先放用户许可，再让命令翻回可派发状态。
+     *
+     * <p>颠倒的后果：{@code recoverExpired} 把命令改成 RETRY_WAIT 且 {@code available_at=now()}，
+     * 100 毫秒后的派发周期就会捞到它；此时 Redis 里的用户许可仍被上一任执行占着（TTL 240 秒），
+     * {@code tryAcquireUser} 失败 → 命令被塞回队首 → 下个周期再弹一次，同一个用户就这样被
+     * 自己的旧执行堵住最长 4 分钟。</p>
+     *
+     * <p>反过来先放许可，最坏情况只是两个执行实例短暂并行；run 租约 + epoch 栅栏会拒绝旧实例的写回，
+     * 所以早放的代价是一次被挡下的写尝试，晚放的代价是用户被确定性阻塞。</p>
+     *
+     * <p>旧实现还有第二重问题：它靠 {@code error_code + 15 秒时间窗} 反查刚恢复的命令，
+     * 既可能漏（窗口外）也可能误伤（把别的实例恢复的命令也 release 一遍）。改成直接按
+     * "即将被恢复"的判据取候选，不再依赖时间窗猜测。</p>
+     */
     @Scheduled(fixedDelay = 5000, scheduler = "leaseScheduler")
     void recoverExpiredLeases() {
         try {
+            for (AgentCommand command : commands.recoverableCommands(RECOVERABLE_PERMIT_BATCH)) {
+                try { fairQueue.releaseUser(command.userId(), command.commandId()); }
+                catch (RuntimeException ignored) { }
+            }
             int recovered = leases.recoverExpired();
             if (recovered > 0) {
                 log.warn("Recovered {} orphan or expired commands", recovered);
                 meters.counter("buyforu_lease_recovered_total").increment(recovered);
-                // 租约恢复后立刻丢掉该命令持有的用户许可，避免再堵满 240 秒。
-                for (AgentCommand command : commands.recentlyRecovered(15)) {
-                    try { fairQueue.releaseUser(command.userId(), command.commandId()); }
-                    catch (RuntimeException ignored) { }
-                }
             }
         } catch (RuntimeException failure) {
             log.error("Lease recovery failed", failure);
