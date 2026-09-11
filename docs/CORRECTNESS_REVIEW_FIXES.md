@@ -108,6 +108,8 @@ Review 不只检查正常路径，还模拟了：
 | Flyway 集成测试冲突 | Agent 扫描到 Commerce 的同版本迁移 | Agent 测试固定使用自身 migration 目录 |
 | 长时间规划命令被 90 秒硬阈值误杀 | heartbeat 用命令“首次开始时间”判定卡住，与 PLANNING 期限 210 秒矛盾 | 续租判据改为命令期限 `deadlineAt`；中断结果区分“用户取消”与“期限届满”（见 3.3） |
 | 一条陈旧租约中断整轮心跳 | `cancellationRequested` 用 `queryForObject` 查询可能不存在的行，空结果抛异常并从心跳循环中冒出 | 改用 `query` 判空；无匹配行时返回 `false`，交由后续更新命中 0 行判定为租约丢失并摘除（见 3.4） |
+| 派发故障时 worker 许可永久泄漏 | `dispatchLane` 只在正常分支手写 `release()`，`commands.find` / `enqueueFront` / `submit` 抛异常时不归还，每失败一次永久少一个并发额度，累积后整条 lane 停摆 | 用 `handedOver` + `finally` 闭合许可归属；成功移交 execute、失败原地归还且只归还一次；新增 `buyforu_dispatch_failure_total` 计数器（见 3.6） |
+| SSE 健康连接被判为代理缓冲 | 服务端心跳间隔与前端读超时都是 15 秒，每次心跳都与超时赛跑，前端永久降级为轮询并额外消耗读取令牌 | 服务端心跳 10 秒、前端读超时 25 秒，两个常量各自写明偏序约束；顺带修掉定时器泄漏与 unhandled rejection（见 3.7） |
 
 ### 3.2 本次重点修复的两个取消 Bug
 
@@ -269,6 +271,92 @@ Review 不只检查正常路径，还模拟了：
 
 判断标准记录下来：不变量 I7 的适用前提是"行可能不存在"，不能以写法相似为由一律改写。
 
+### 3.6 Bug 5：派发路径在故障时不归还 worker 许可
+
+#### 失败场景
+
+`CommandWorker.dispatchLane`（第 169 行）先用 `permits.tryAcquire()` 占一个并发额度，之后依次调用 `commands.find`、`commands.markExpired`、`fairQueue.enqueueFront`、`executor.submit`。修复前只有几条正常分支显式 `release()`，这些调用**抛异常时许可不会归还**，而 `dispatch()` 也没有外层捕获——`@Scheduled` 只把异常写进日志后继续下一个周期。
+
+`application.yml` 刻意把 `connection-timeout` 设为 1000ms（快速失败、不堆积线程），这意味着高负载下拿到连接失败**是预期事件而不是异常事件**。每一次都永久吃掉一个额度：PLANNING 20 / TRANSACTION 16 / CONTROL 4。反复发生会把某条 lane 的并发度蚕食到 0，此后该 lane 不再派发任何命令，且**只能通过重启进程恢复**——因为它不是流量问题，而是计数器已经错了。
+
+#### 根因
+
+许可的"取得"和"归还"跨越了两个方法（`dispatchLane` 取得、`execute` 的 finally 归还），中间却是一串可以抛异常的调用。修复前用"在每个正常出口手写 release"来维护这个不变量，等于把账目正确性交给人工枚举分支——漏掉任意一条就静默丢额度。
+
+#### 当前修复
+
+- `dispatchLane` 用 `handedOver` 标志 + `finally` 保证"要么本方法归还、要么移交 execute"，不再依赖逐分支枚举。
+- 抽出 `handOver(command, permits, executor, holdsUserPermit)`：提交成功返回 `true`（许可交给 execute），提交失败返回 `false` 且**不自行归还**——归还统一由调用方的 `finally` 执行，避免两边都归还把额度放大。
+- CONTROL 分支（第 69-74 行）同样改成"提交失败原地归还"，此前 `control.submit` 抛出 `RejectedExecutionException` 也会漏额度。
+- 新增计数器 `buyforu_dispatch_failure_total{queue_class=...}`，让这类故障可告警，而不是只留一行日志。
+- Redis 协调层抖动仍走静默返回（不计入该计数器）：按每个派发周期（100ms）计一次失败会让告警失去意义。
+
+#### 不变量
+
+I8：`permits.tryAcquire()` 成功之后，该许可必须被归还**恰好一次**——由 `dispatchLane` 或由 `execute`，二者必居其一。
+
+#### 对应测试
+
+`CommandWorkerPermitTest` 把真实的 `Semaphore` 传进 `dispatchLane` 再数一遍，覆盖四条故障出口加一条成功移交：
+
+| 用例 | 断言 |
+| --- | --- |
+| `returnsPermitWhenCommandLookupFails` | 查询命令抛 `DataAccessResourceFailureException` → 许可数回到初值，失败计数器 +1 |
+| `returnsPermitWhenQueuePollFailsSilently` | Redis 抖动 → 许可数回到初值，且**不**计入失败计数器 |
+| `returnsPermitWhenUserAlreadyHasARunningCommand` | 用户已有在跑命令 → 许可归还且命令被塞回队头 |
+| `returnsPermitWhenExecutorRejectsSubmission` | 线程池拒绝 → 许可归还（并验证确实走到了提交这一步） |
+| `handsPermitOverExactlyOnceOnSuccess` | 成功移交 → `execute` 归还一次，`dispatchLane` 不得再还一次 |
+
+回归锁经过反向验证：临时撤销 `finally` 归还后，前四条以 `expected: <2> but was: <1>` 失败，正是"永久少一个额度"的现象。
+
+`dispatchLane` 由 private 放宽为包级私有，属于为可测性开的第二道缝（同 3.4 的 `heartbeatOver`）：许可账目只有把真实 `Semaphore` 交进去数一遍才能证明，静态断言看不出"少还一个"或"多还一个"。
+
+#### 已知取舍
+
+引入 `finally` 后，`dispatchLane` 内部的每条 `return` 都隐含一次 `release()`，可读性略低于原来的显式释放。这是刻意的：把不变量交给语言结构而不是人工分支，正是这类缺陷的修复要点。
+
+### 3.7 Bug 6：SSE 心跳间隔与前端读超时相等，健康连接被判为代理缓冲
+
+#### 失败场景
+
+服务端 `RunEventController` 每 15 秒发一次心跳帧，前端 `followRun` 给 `reader.read()` 设的软超时**也是 15 秒**，一旦超时即 `break` 并永久降级为 500ms→2s 轮询。
+
+两个常量相等意味着每次心跳都在和超时赛跑：健康连接也会以接近一半的概率被判成"开发代理缓冲了 SSE"。后果是生产环境 SSE 实际不可用，退回轮询；同时每次重连都消耗读取令牌桶（`readUserBurst=30`、`readUserPerMinute=120`），长时间任务会额外触发 429。
+
+#### 根因
+
+"用读超时探测代理缓冲"这个思路本身没问题，缺的是**两个常量的偏序约束**：客户端超时必须显著大于服务端心跳间隔。此前两个数字分别写在前后端两个文件里，没有任何一处记录它们必须满足的关系。
+
+#### 当前修复
+
+- 服务端提取常量 `HEARTBEAT_INTERVAL_MS = 10_000`，替换原先散落的 `15_000` 魔数，并在注释里写明当前约定：**服务端 10 秒心跳、前端 25 秒读超时**。
+- 前端提取常量 `SSE_READ_TIMEOUT_MS = 25_000`，注释说明它必须显著大于服务端心跳间隔，且指出"两个常量相等时每次心跳都在和超时赛跑"。
+- 顺带修掉两个前端小缺陷：超时用的定时器在每次循环结束时 `clearTimeout`（一条连接可能收到成百上千条事件，否则定时器会一路积到 25 秒后才触发）；超时后被 `reader.cancel()` 拒绝的那个 read promise 先挂 `catch(() => undefined)`，避免控制台出现 unhandled rejection。
+
+#### 不变量
+
+I9：前端 SSE 读超时 > 服务端心跳间隔。违反时系统不会报错，只会静默降级到轮询，因此这条偏序关系必须写在两个常量的注释里。
+
+#### 对应测试
+
+前端没有自动化测试框架，验证方式是隔离环境下的严格类型检查（`tsc --noEmit --strict --noUnusedLocals`，见 5.1）。偏序关系本身是常量取值约定，靠注释与本节记录维护；若后续引入前端测试，应补一条断言 `SSE_READ_TIMEOUT_MS > 服务端心跳` 的用例。
+
+### 3.8 本轮复审已确认但尚未修复的问题
+
+以下问题已定位到具体位置并确认存在，但不在本次修复范围内（涉及协议变更、架构决策或测试语义调整，需要单独确认），记录在此避免丢失：
+
+| 级别 | 问题 | 位置 |
+| --- | --- | --- |
+| P2 | 终态迁移不校验"是否抢到"，却无条件发终态 SSE 事件：`markSucceeded` 等是 `void` 且 SQL 带条件，被 `recoverExpired` 抢走的旧 Worker 更新 0 行，仍会 append `command.completed` | `CommandWorker` 第 202-206 行、`CommandRepository` 第 116-176 行 |
+| P2 | 测试替身与生产语义分叉：内存 `EffectLedger` 把 `CommerceException` 缓存并重放失败，生产 `JdbcCommerceEngine` 靠事务回滚后真正重跑 | `EffectLedger` 第 38-43 行 |
+| P2 | Outbox 排空与 CLAIMED 回收共用单线程调度器，webhook"慢但成功"加积压时回收任务被饿死 | `commerce/config/SchedulingConfiguration` 第 16-17 行、`OutboxDispatcher` 第 37-61 行 |
+| P2 | Webhook 签名不含时间戳，合法请求可被无限重放（需改协议，须与对端约定） | `WebhookDomainEventPublisher` 第 43-51 行 |
+| P2 | Commerce MCP 使用全局单令牌，且 `userId` 由调用方传入、Commerce 侧不校验身份，令牌泄露即等于全用户数据读写权 | `McpSecurityConfiguration` 第 29-31 行、`CommerceMcpTools` 第 24-27/96-102 行 |
+| P2 | 恢复路径先重排队、后释放用户许可，窗口内命令被重派发会因旧许可（TTL 240 秒）反复回弹 | `CommandWorker` 第 143-159 行 |
+| P3 | `InFlightCallRegistry` 无 TTL 与兜底清理；`CommandService.accept` 全程非事务，事件缺失无补偿扫描 | `InFlightCallRegistry`、`CommandService` 第 35-92 行 |
+
+本轮同时核实了一批**并非缺陷**的实现，避免后续重复排查：`CommandService.accept` 对非 START 命令先 `assertRunOwner` 堵住 IDOR；`JdbcConversationMemory` 的先锁行再验主人；`effect_record` 在 `effect_id`（主键）与 `idempotency_key`（唯一索引）上双唯一；`createOrder` 的审批归属/摘要/时效三重校验配合 `orders.source_snapshot_id` 唯一约束；`agent_run_event` 的 7 天保留确有定时任务调用；`SearchRequest` 在领域层夹紧 `limit∈[1,50]`、`quantity∈[1,99]`，MCP 层无从放大查询。
+
 ## 4. 当前事务与恢复语义
 
 ### 4.1 预占响应未知
@@ -298,11 +386,13 @@ docker compose config
 git diff --check
 ```
 
+`web/node_modules` 不可用时（例如受限执行环境不允许在项目目录内安装依赖），前端改动的最小等价验证是：把 `src/api.ts` 与 `src/types.ts` 复制到临时目录、为 `src/auth.ts` 提供 `accessToken` 桩，再用 `tsc --noEmit --strict --noUnusedLocals` 检查。这样能覆盖语法与类型正确性，但不覆盖 Vite 生产构建和 React 组件。
+
 ### 5.2 当前验证范围
 
 | 层级 | 覆盖内容 |
 | --- | --- |
-| 单元测试 | 固定图、PlanSpec、预算、Commerce effect、取消、订单恢复、MCP cause 分类、事务内网络调用保护、RAG 切块 |
+| 单元测试 | 固定图、PlanSpec、预算、Commerce effect、取消、订单恢复、MCP cause 分类、事务内网络调用保护、RAG 切块、派发路径的 worker 许可账目（四条故障出口 + 一条成功移交，见 3.6） |
 | Commerce 集成测试 | PostgreSQL 预算快照、订单按快照解析、Outbox 投递 |
 | Agent 集成测试 | Run ownership、多 Worker claim、过期租约、当前 CONTROL 租约排除、心跳续租判定（含陈旧租约不拖垮整轮）、12 run × 8 worker 并发争用下的租约互斥性与 epoch 栅栏、200 命令 × 20 用户全链路吞吐（受理 → 限流 → 公平队列 → 领取 → 执行 → 释放，实测吞吐 878 条/秒、端到端 p95=278ms，并断言全部成功、无残留租约、队列排空、无用户饿死） |
 | 前端构建 | TypeScript 编译、Vite 生产构建 |
