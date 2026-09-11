@@ -3,6 +3,9 @@ package com.buyforu.agent.concurrency;
 import com.buyforu.agent.concurrency.AgentCommand.CommandStatus;
 import com.buyforu.agent.concurrency.AgentCommand.CommandType;
 import com.buyforu.agent.concurrency.AgentCommand.QueueClass;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
@@ -12,6 +15,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -19,17 +23,21 @@ import java.util.UUID;
  */
 @Service
 public class CommandService {
+    private static final Logger log = LoggerFactory.getLogger(CommandService.class);
     private final CommandRepository commands;
     private final RedisAdmissionController admission;
     private final RedisFairQueue fairQueue;
     private final RunEventRepository events;
     private final RunLeaseRepository leases;
     private final ObjectMapper json;
+    private final MeterRegistry meters;
 
     public CommandService(CommandRepository commands, RedisAdmissionController admission, RedisFairQueue fairQueue,
-                          RunEventRepository events, RunLeaseRepository leases, ObjectMapper json) {
+                          RunEventRepository events, RunLeaseRepository leases, ObjectMapper json,
+                          MeterRegistry meters) {
         this.commands = commands; this.admission = admission; this.fairQueue = fairQueue;
         this.events = events; this.leases = leases; this.json = json;
+        this.meters = meters;
     }
 
     public CommandAccepted accept(String runId, String userId, String remoteAddress, String idempotencyKey, CommandType type,
@@ -78,17 +86,34 @@ public class CommandService {
             // Lettuce/Redis 原始异常可能包含地址与拓扑信息，统一转成稳定的 503 协议错误。
             throw new CommandExceptions.CoordinationUnavailable(rejected);
         }
-        events.append(runId, command.commandId(), "command.accepted",
-                java.util.Map.of("status", command.status().name(), "queueClass", lane.name()));
+        appendEventQuietly(runId, command.commandId(), "command.accepted",
+                Map.of("status", command.status().name(), "queueClass", lane.name()));
         if (type == CommandType.CANCEL && !commands.runStateExists(runId)) {
             // START 仍在队列且尚未创建 agent_run 时，取消持久化命令本身就是完整结果，
             // 无需让控制 Worker 去读取一个尚不存在的业务状态。
-            commands.markCancelled(command.commandId(), "RUN_CANCELLED_BEFORE_START");
-            events.append(runId, command.commandId(), "command.cancelled",
-                    java.util.Map.of("phase", "CANCELLED"));
+            if (commands.markCancelled(command.commandId(), "RUN_CANCELLED_BEFORE_START") == 1) {
+                appendEventQuietly(runId, command.commandId(), "command.cancelled", Map.of("phase", "CANCELLED"));
+            }
             return CommandAccepted.from(commands.find(command.commandId()).orElseThrow());
         }
         return CommandAccepted.from(command);
+    }
+
+    /**
+     * 事件写入是"尽力而为"，不能反过来决定受理结果。
+     *
+     * <p>走到这一步时命令已经落库、也已经进了（或已在）全序控制，客户端重试还会命中幂等键。
+     * 如果因为写事件失败就把 202 变成 500，客户端会以为命令没被受理；而它其实已经在跑。
+     * 丢的只是一个 SSE 锚点，状态机不依赖它——真正的终态事件由 Worker 在状态迁移成功后补发。</p>
+     */
+    private void appendEventQuietly(String runId, UUID commandId, String eventType, Map<String, Object> payload) {
+        try {
+            events.append(runId, commandId, eventType, payload);
+        } catch (RuntimeException failure) {
+            meters.counter("buyforu_run_event_append_failed_total", "event_type", eventType).increment();
+            log.warn("Could not append the {} event for command {}; the command itself is accepted",
+                    eventType, commandId, failure);
+        }
     }
 
     public AgentCommand get(UUID commandId, String userId) {

@@ -54,7 +54,7 @@ class CommandWorkerHeartbeatIT {
         // renewLease 只用到 commands / leases / properties / inFlight，
         // 其余协作者参与的是调度与执行路径，与本判定无关，故传 null。
         worker = new CommandWorker(commands, leases, null, null, null, properties(), null, null,
-                new InFlightCallRegistry());
+                new InFlightCallRegistry(new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     /** 已运行 180 秒的规划命令仍须续租：这正是旧实现用 90 秒硬阈值会误杀的场景。 */

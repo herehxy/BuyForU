@@ -56,7 +56,7 @@ class CommandWorkerPermitTest {
         events = mock(RunEventRepository.class);
         meters = new SimpleMeterRegistry();
         worker = new CommandWorker(commands, leases, fairQueue, workflow, events, properties(),
-                new ObjectMapper(), meters, new InFlightCallRegistry());
+                new ObjectMapper(), meters, new InFlightCallRegistry(meters));
     }
 
     @AfterEach
