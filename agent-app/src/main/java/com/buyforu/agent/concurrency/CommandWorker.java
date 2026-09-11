@@ -68,7 +68,9 @@ public class CommandWorker {
         // 一次取多条可执行的 CONTROL，跳过租约还被占用的 run。
         for (AgentCommand command : commands.controlReady(properties.controlWorkers())) {
             if (!controlPermits.tryAcquire()) break;
-            control.submit(() -> execute(command, controlPermits, false));
+            // CONTROL 命令不占用户执行许可，因此这里没有释放用户许可的动作；
+            // handOver 返回 false 时许可仍归调用方，必须原地归还。
+            if (!handOver(command, controlPermits, control, false)) controlPermits.release();
         }
     }
 
@@ -158,25 +160,59 @@ public class CommandWorker {
         }
     }
 
-    private void dispatchLane(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor) {
+    /**
+     * 许可的归属在这一层必须闭合：要么本方法归还，要么移交给 execute 由它的 finally 归还。
+     * 历史缺陷是 tryAcquire 之后的 commands.find / markExpired / enqueueFront / submit 都没有
+     * 归还路径，任何一次瞬时故障（连接超时、Redis 抖动、线程池拒绝）都会永久少一个并发额度，
+     * 反复发生会让整条 lane 停止派发且只能靠重启恢复。
+     *
+     * 包级私有测试缝：许可账目只有把真实的 Semaphore 交进来再数一遍才能证明，
+     * 静态断言看不出"少还一个"或"多还一个"。
+     */
+    void dispatchLane(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor) {
         if (!permits.tryAcquire()) return;
-        UUID id;
-        try { id = fairQueue.poll(lane); }
-        catch (RuntimeException unavailable) { permits.release(); return; }
-        if (id == null) { permits.release(); return; }
-        AgentCommand command = commands.find(id).orElse(null);
-        if (command == null || (command.status() != AgentCommand.CommandStatus.QUEUED
-                && command.status() != AgentCommand.CommandStatus.RETRY_WAIT)
-                || command.deadlineAt().isBefore(Instant.now())) {
-            if (command != null) commands.markExpired(id);
-            permits.release(); return;
+        boolean handedOver = false;
+        try {
+            UUID id;
+            // Redis 协调层抖动时静默跳过：这是预期内的降级，不能按每个派发周期刷日志。
+            try { id = fairQueue.poll(lane); }
+            catch (RuntimeException coordinationUnavailable) { return; }
+            if (id == null) return;
+            AgentCommand command = commands.find(id).orElse(null);
+            if (command == null || (command.status() != AgentCommand.CommandStatus.QUEUED
+                    && command.status() != AgentCommand.CommandStatus.RETRY_WAIT)
+                    || command.deadlineAt().isBefore(Instant.now())) {
+                if (command != null) commands.markExpired(id);
+                return;
+            }
+            if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
+                fairQueue.enqueueFront(command);
+                return;
+            }
+            handedOver = handOver(command, permits, executor, true);
+        } catch (RuntimeException dispatchFailure) {
+            meters.counter("buyforu_dispatch_failure_total", "queue_class", lane.name()).increment();
+            log.warn("Dispatch for the {} lane failed; returning its worker permit", lane, dispatchFailure);
+        } finally {
+            if (!handedOver) permits.release();
         }
-        if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
-            fairQueue.enqueueFront(command);
-            permits.release();
-            return;
+    }
+
+    /**
+     * 把命令交给执行器。返回 true 表示许可已移交给 execute，调用方不得再释放；
+     * false 表示提交失败，由调用方的 finally 归还许可（本方法不归还，避免重复释放把额度放大）。
+     */
+    private boolean handOver(AgentCommand command, Semaphore permits, ExecutorService executor,
+                             boolean holdsUserPermit) {
+        try {
+            executor.submit(() -> execute(command, permits, holdsUserPermit));
+            return true;
+        } catch (RuntimeException rejected) {
+            meters.counter("buyforu_dispatch_failure_total", "queue_class", command.queueClass().name()).increment();
+            log.warn("Could not hand command {} to a worker; its permit will be returned",
+                    command.commandId(), rejected);
+            return false;
         }
-        executor.submit(() -> execute(command, permits, true));
     }
 
     private void execute(AgentCommand command, Semaphore permit, boolean holdsUserPermit) {
