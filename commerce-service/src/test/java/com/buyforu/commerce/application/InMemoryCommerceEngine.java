@@ -127,12 +127,14 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
 
     @Override
     public DeliveryAddress registerAddress(RegisterAddressCommand command, EffectContext effectContext) {
+        assertEffectUser(effectContext, command.userId());
         return new DeliveryAddress(UUID.randomUUID().toString(), command.userId(), command.zoneCode(), 1);
     }
 
     @Override
     public synchronized ConfirmableOrderSnapshot prepareConfirmableOrder(
             PrepareOrderRequest request, EffectContext effectContext) {
+        assertEffectUser(effectContext, request.userId());
         String requestHash = hash("prepare", request.userId(), request.skuId(), String.valueOf(request.quantity()),
                 request.addressId(), budgetKey(request.budgetMax()), budgetKey(request.budgetMin()));
         return effectLedger.execute(effectContext, "PREPARE_CONFIRMABLE_ORDER", requestHash, () -> {
@@ -182,6 +184,7 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
 
     @Override
     public synchronized Order createOrder(CreateOrderCommand command, EffectContext effectContext) {
+        assertEffectUser(effectContext, command.userId());
         ApprovalProof approval = command.approval();
         String requestHash = hash("create-order", command.userId(), command.snapshotId(),
                 approval == null ? "" : approval.approvalId(), approval == null ? "" : approval.expectedSummaryHash());
@@ -205,6 +208,42 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    public synchronized Order cancelOrder(CancelOrderCommand command, EffectContext effectContext) {
+        // 语义必须与 JdbcCommerceEngine.cancelOrder 逐条对齐，否则测试会给出生产不成立的绿灯。
+        assertEffectUser(effectContext, command.userId());
+        String requestHash = hash("cancel-order", command.orderId(), command.userId());
+        return effectLedger.execute(effectContext, "CANCEL_ORDER", requestHash, () -> {
+            Order current = orders.get(command.orderId());
+            if (current == null) throw new CommerceException("ORDER_NOT_FOUND", "order not found");
+            if (!current.userId().equals(command.userId())) {
+                throw new CommerceException("ORDER_USER_MISMATCH", "order belongs to another user");
+            }
+            // 第一道栅栏：只有 PENDING_PAYMENT → CANCELLED 这一次迁移是我赢的。
+            if (current.status() != OrderStatus.PENDING_PAYMENT) {
+                if (current.status() != OrderStatus.CANCELLED) {
+                    throw new CommerceException("ORDER_NOT_CANCELLABLE",
+                            "order cannot be cancelled from state " + current.status());
+                }
+                return current;
+            }
+            Reservation reservation = requireReservation(current.reservationId());
+            if (reservation.status() != ReservationStatus.CONSUMED) {
+                throw new CommerceException("RESERVATION_STATE_INCONSISTENT",
+                        "order exists but its reservation is not consumable: " + reservation.status());
+            }
+            // 第二道栅栏：CONSUMED 只能被迁移一次，库存也只回补一次。
+            reservations.put(reservation.reservationId(),
+                    withStatus(reservation, ReservationStatus.RELEASED_BY_CANCEL));
+            inventory.merge(reservation.skuId(), reservation.quantity(), Integer::sum);
+            Order cancelled = new Order(current.orderId(), current.userId(), current.sourceSnapshotId(),
+                    current.reservationId(), current.quote(), OrderStatus.CANCELLED,
+                    current.createdAt(), current.version() + 1);
+            orders.put(cancelled.orderId(), cancelled);
+            return cancelled;
+        });
+    }
+
+    @Override
     public synchronized java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
         ConfirmableOrderSnapshot snapshot = requireSnapshot(snapshotId);
         if (!snapshot.userId().equals(userId)) {
@@ -215,6 +254,17 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                 .findFirst();
     }
 
+    @Override
+    public synchronized java.util.List<Order> listOrders(String userId, int limit) {
+        if (userId == null || userId.isBlank()) throw new IllegalArgumentException("userId is required");
+        if (limit < 1 || limit > 100) throw new IllegalArgumentException("order limit must be between 1 and 100");
+        return orders.values().stream()
+                .filter(order -> order.userId().equals(userId))
+                .sorted(java.util.Comparator.comparing(Order::createdAt).reversed())
+                .limit(limit)
+                .toList();
+    }
+
     public int availableStock(String skuId) {
         expireReservations();
         return inventory.getOrDefault(skuId, 0);
@@ -222,6 +272,24 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
 
     public int orderCount() {
         return orders.size();
+    }
+
+    /** 测试可见：某 SKU 在指定预占状态下的数量合计，用于断言库存守恒。 */
+    int quantityInStatus(String skuId, ReservationStatus status) {
+        return reservations.values().stream()
+                .filter(reservation -> reservation.skuId().equals(skuId) && reservation.status() == status)
+                .mapToInt(Reservation::quantity)
+                .sum();
+    }
+
+    /** 测试可见：单个预占的当前状态，用于区分 RELEASED 与 RELEASED_BY_CANCEL。 */
+    ReservationStatus reservationStatus(String reservationId) {
+        return requireReservation(reservationId).status();
+    }
+
+    /** 测试可见：直接读订单，绕过 effect ledger，用于确认"重放返回的订单"确实落盘。 */
+    Order storedOrder(String orderId) {
+        return orders.get(orderId);
     }
 
     private void validateApproval(CreateOrderCommand command, ConfirmableOrderSnapshot snapshot) {
@@ -261,6 +329,19 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
         requireItem(skuId);
         if (inventory.getOrDefault(skuId, 0) < quantity) {
             throw new CommerceException("OUT_OF_STOCK", "insufficient inventory");
+        }
+    }
+
+    /**
+     * 与 {@code JdbcCommerceEngine.assertEffectUser} 逐字对齐。
+     *
+     * <p>替身早期漏掉了这道检查，结果是"越权取消"这条断言在替身上恒绿——生产上会抛
+     * {@code EFFECT_USER_MISMATCH}，替身却默默放行，测试反而比生产宽松。替身一旦比生产宽松，
+     * 它就是假绿的温床。</p>
+     */
+    private static void assertEffectUser(EffectContext effect, String commandUserId) {
+        if (!effect.userId().equals(commandUserId)) {
+            throw new CommerceException("EFFECT_USER_MISMATCH", "effect belongs to another user");
         }
     }
 

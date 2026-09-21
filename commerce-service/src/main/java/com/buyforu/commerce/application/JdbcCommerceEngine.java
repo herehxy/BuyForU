@@ -388,6 +388,88 @@ public class JdbcCommerceEngine implements CommerceGateway {
     }
 
     @Override
+    @Transactional
+    public Order cancelOrder(CancelOrderCommand command, EffectContext effect) {
+        // ===== 第二条写路径：取消订单并回补库存 ==================================
+        assertEffectUser(effect, command.userId());
+        // 幂等身份由调用方按 (userId, orderId) 确定性派生，刻意不含 runId：取消可能从订单页发起，
+        // 而订单并不记录产生它的 Run；若以 runId 为锚，同一订单经两个 Run 取消会派生出两个幂等键，
+        // effect ledger 挡不住，库存会被回补两次。
+        String requestHash = hash("cancel-order", command.orderId(), command.userId());
+        Order replay = beginEffect(effect, "CANCEL_ORDER", requestHash, Order.class);
+        if (replay != null) return replay;
+        // 锁顺序固定为 orders → inventory_reservation → inventory，与 createOrder 保持一致。
+        // 顺序一旦颠倒就可能与下单路径形成环，这类死锁只在并发下暴露，靠评审看不出来。
+        Order current = jdbc.query("""
+                SELECT order_payload::text FROM commerce_schema.orders
+                WHERE order_id = ? FOR UPDATE
+                """, (result, row) -> json.readValue(result.getString(1), Order.class), command.orderId())
+                .stream().findFirst()
+                .orElseThrow(() -> new CommerceException("ORDER_NOT_FOUND", "order not found"));
+        if (!effect.userId().equals(current.userId())) {
+            throw new CommerceException("ORDER_USER_MISMATCH", "order belongs to another user");
+        }
+        Order cancelled = new Order(current.orderId(), current.userId(), current.sourceSnapshotId(),
+                current.reservationId(), current.quote(), OrderStatus.CANCELLED,
+                current.createdAt(), current.version() + 1);
+        // 第一道栅栏（订单维度）：只有命中这一行的调用才是"我赢的取消"。状态列与 order_payload
+        // 在同一条语句里推进，杜绝"列已取消、载荷仍是待付款"的中间态被后续读路径读到。
+        int moved = jdbc.update("""
+                UPDATE commerce_schema.orders
+                SET status = 'CANCELLED', version = version + 1, cancelled_at = now(),
+                    order_payload = CAST(? AS jsonb)
+                WHERE order_id = ? AND status = 'PENDING_PAYMENT'
+                """, json.writeValueAsString(cancelled), command.orderId());
+        if (moved == 0) {
+            // 已是终态：返回既成事实，不抛异常也不产生任何新副作用（幂等）。
+            // 除 CANCELLED 外的其它状态目前不可达（系统没有支付）；一旦接入支付，
+            // 需要在这里显式放行新的可取消状态，而不是默默把订单当成已取消。
+            if (current.status() != OrderStatus.CANCELLED) {
+                throw new CommerceException("ORDER_NOT_CANCELLABLE",
+                        "order cannot be cancelled from state " + current.status());
+            }
+            completeEffect(effect, current.orderId(), current);
+            return current;
+        }
+        List<ReservationRow> rows = jdbc.query("""
+                SELECT sku_id, quantity, status FROM commerce_schema.inventory_reservation
+                WHERE reservation_id = ? FOR UPDATE
+                """, (result, row) -> new ReservationRow(result.getString(1), result.getInt(2), result.getString(3)),
+                current.reservationId());
+        if (rows.isEmpty()) throw new CommerceException("RESERVATION_NOT_FOUND", "reservation not found");
+        ReservationRow reservation = rows.getFirst();
+        if (!ReservationStatus.CONSUMED.name().equals(reservation.status())) {
+            // createOrder 在同一事务里把预占置为 CONSUMED，且没有任何路径能再改变它。
+            // "订单存在但预占不是 CONSUMED" 属于不变量被破坏：整体回滚比静默放行安全，
+            // 因为静默放行会让订单变成已取消却拿不回库存，直接破坏库存守恒。
+            throw new CommerceException("RESERVATION_STATE_INCONSISTENT",
+                    "order exists but its reservation is not consumable: " + reservation.status());
+        }
+        // 第二道栅栏（预占维度）：即使幂等键因任何原因算错，CONSUMED 也只能被迁移一次。
+        // 两道栅栏是纵深防御——ledger 负责"同一请求只执行一次"，状态迁移负责"同一副作用只发生一次"。
+        int released = jdbc.update("""
+                UPDATE commerce_schema.inventory_reservation SET status = 'RELEASED_BY_CANCEL'
+                WHERE reservation_id = ? AND status = 'CONSUMED'
+                """, current.reservationId());
+        if (released != 1) {
+            throw new CommerceException("RESERVATION_STATE_INCONSISTENT",
+                    "reservation was concurrently released: " + current.reservationId());
+        }
+        jdbc.update("""
+                UPDATE commerce_schema.inventory SET available_quantity = available_quantity + ?, version = version + 1
+                WHERE sku_id = ?
+                """, reservation.quantity(), reservation.skuId());
+        // 与订单状态同事务写入：不会出现"订单已取消但取消事件永久丢失"的状态。
+        jdbc.update("""
+                INSERT INTO commerce_schema.outbox_event
+                    (event_id, aggregate_type, aggregate_id, event_type, payload, status)
+                VALUES (?, 'ORDER', ?, 'ORDER_CANCELLED', CAST(? AS jsonb), 'PENDING')
+                """, UUID.randomUUID().toString(), cancelled.orderId(), json.writeValueAsString(cancelled));
+        completeEffect(effect, cancelled.orderId(), cancelled);
+        return cancelled;
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
         if (userId == null || userId.isBlank() || snapshotId == null || snapshotId.isBlank()) {
@@ -406,6 +488,18 @@ public class JdbcCommerceEngine implements CommerceGateway {
                 WHERE source_snapshot_id=? AND user_id=?
                 """, (result, row) -> json.readValue(result.getString(1), Order.class), snapshotId, userId)
                 .stream().findFirst();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<Order> listOrders(String userId, int limit) {
+        if (userId == null || userId.isBlank()) throw new IllegalArgumentException("userId is required");
+        if (limit < 1 || limit > 100) throw new IllegalArgumentException("order limit must be between 1 and 100");
+        // 只按 user_id 过滤即可保证归属：user_id 由服务端从已校验 JWT 写入，不接受客户端自报。
+        return jdbc.query("""
+                SELECT order_payload::text FROM commerce_schema.orders
+                WHERE user_id = ? ORDER BY created_at DESC, order_id DESC LIMIT ?
+                """, (result, row) -> json.readValue(result.getString(1), Order.class), userId, limit);
     }
 
     private LocalDate resolveDeliveryDate(String addressId, String expectedUserId) {
