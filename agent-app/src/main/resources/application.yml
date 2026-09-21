@@ -94,6 +94,14 @@ buyforu:
     read-user-burst: ${READ_USER_BURST:30}
     global-write-rate-per-second: ${GLOBAL_WRITE_RATE_PER_SECOND:100}
     global-write-burst: ${GLOBAL_WRITE_BURST:200}
+  retention:
+    # 审计记录是「线上 Badcase 回流评测集」的唯一过程证据，窗口要长于一个迭代周期。
+    # 原先 run_event 硬编码 7 天、tool_call 无保留策略，两者矛盾且都不可运维。
+    run-event: ${AUDIT_RUN_EVENT_RETENTION:P90D}
+    tool-call: ${AUDIT_TOOL_CALL_RETENTION:P90D}
+    batch-size: ${AUDIT_RETENTION_BATCH_SIZE:1000}
+    max-batches-per-cycle: ${AUDIT_RETENTION_MAX_BATCHES:20}
+    poll-delay: ${AUDIT_RETENTION_POLL_DELAY:PT1H}
 server:
   port: ${PORT:8080}
 management:
