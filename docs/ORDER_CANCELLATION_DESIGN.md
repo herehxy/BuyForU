@@ -408,8 +408,24 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON commerce_schema.orders (status);
 
 **尚未完成（明确记录，不留悬空）**：
 
-1. **`*IT` 类不会被 `mvn test` / `mvn verify` 执行**——项目没有配置 failsafe，`*IT` 不在 surefire 默认包含范围内，
-   目前只能显式 `-Dtest=OrderCancellationIT` 手动跑。这是任务 #20（定 CI 策略）的一部分：
-   **不修这一点，"有集成测试"就是一句需要人工记忆才能成立的话。**
-2. 文档收口（`PROJECT_DESIGN.md` / `FILE_INDEX.md` / `CODE_GUIDE.md` 同步本节内容）并入任务 #20。
-3. 本地 `commerce-service` 尚需重启一次以应用 V10（重启前 `orders.status` 无 CHECK 约束）。
+1. 文档收口（`PROJECT_DESIGN.md` / `FILE_INDEX.md` / `CODE_GUIDE.md` 同步本节内容）。
+2. 本地 `commerce-service` 尚需重启一次以应用 V10（重启前 `orders.status` 无 CHECK 约束）。
+3. 文档（含 `PROJECT_DEEP_DIVE.md`）多处把 `mvn test` 当成"全部测试"来引用，
+   实际它只跑单元测试。见下方更正。
+
+**⚠ 更正（2026-09-21，由 CI 配置反查发现）**：
+
+本文件早期版本写过"项目没有配置 failsafe，`*IT` 只能手动 `-Dtest=OrderCancellationIT` 跑"，
+**这是错的**。项目根 `pom.xml` 里既有 surefire 的 `<exclude>**/*IT.java</exclude>`（第 94–96 行），
+也有 `integration` profile 下的 maven-failsafe-plugin（第 119–143 行）。正确的运行方式是：
+
+```bash
+./mvnw test                  # 单元测试，刻意排除 *IT
+./mvnw -Pintegration verify  # 集成测试，failsafe 只跑 *IT
+```
+
+也就是说"`mvn test` 不跑集成测试"是**设计**，不是缺失。`.github/workflows/ci.yml` 两条都跑。
+
+教训：写"某能力不存在"这类否定判断前，必须去查配置本身（`pom.xml`、`ci.yml`），
+不能因为"跑 `mvn test` 时没看到 IT"就反推"没有配置"。**否定性结论的举证责任更高**，
+因为它会直接导致一份本可自动守护的保证退化成需要人工记忆的口头约定。
