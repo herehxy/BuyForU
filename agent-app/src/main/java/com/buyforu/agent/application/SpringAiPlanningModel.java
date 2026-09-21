@@ -171,7 +171,12 @@ public final class SpringAiPlanningModel implements PlanningModel {
     private PlanSpec requestPlan(String request, PlanSpec.ShoppingConstraints contextConstraints,
                                  String failureReason, int attempt) {
         String constraints = contextConstraints == null ? "null" : json.writeValueAsString(contextConstraints);
-        List<KnowledgeRetriever.KnowledgeHit> evidence = knowledge.retrieve(request, 5, 0.65);
+        // 阈值由 eval/rag/golden-set.json 标定，不是拍脑袋的常数：当前嵌入模型（embeddinggemma）
+        // 加整篇切块，相似度天花板约 0.62，原先的 0.65 不可达 —— retrieve() 会对任何查询都返回空，
+        // RAG 接了线却永远是死的且不报错。0.53 取自"负样本零命中 + 正样本能过线"的安全窗口
+        // [0.515, 0.535]，取上界偏向精确率：召回错误的政策数字比不召回更危险。
+        // 改这里必须同步改金标集，RagRetrievalEvalTest 会校验两处一致。
+        List<KnowledgeRetriever.KnowledgeHit> evidence = knowledge.retrieve(request, 5, 0.53);
         String knowledgeContext = evidence.isEmpty() ? "[]" : json.writeValueAsString(evidence);
         // 不要 validateSchema：模型常把可选字段写成 null，Spring AI 会连着重试，按钮一直转圈。
         PlanSpec plan = dependencies.call(DependencyExecutor.Dependency.DEEPSEEK, Duration.ofSeconds(45), 2,
