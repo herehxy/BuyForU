@@ -21,6 +21,11 @@ public final class McpCommerceGatewayAdapter implements CommerceGateway {
     }
 
     @Override
+    public java.util.List<InventoryItem> listInventory() {
+        return client.inventoryList();
+    }
+
+    @Override
     public SearchResult searchProducts(SearchRequest request) {
         return client.catalogSearch(request);
     }
@@ -48,5 +53,20 @@ public final class McpCommerceGatewayAdapter implements CommerceGateway {
     @Override
     public Order createOrder(CreateOrderCommand command, EffectContext effectContext) {
         return client.orderCreate(command, effectContext);
+    }
+
+    @Override
+    public Order cancelOrder(CancelOrderCommand command, EffectContext effectContext) {
+        return client.orderCancel(command, effectContext);
+    }
+
+    @Override
+    public java.util.Optional<Order> findOrderBySnapshot(String userId, String snapshotId) {
+        return client.orderFindBySnapshot(userId, snapshotId);
+    }
+
+    @Override
+    public java.util.List<Order> listOrders(String userId, int limit) {
+        return client.orderList(userId, limit);
     }
 }

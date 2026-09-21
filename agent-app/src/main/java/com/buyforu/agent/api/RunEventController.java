@@ -27,6 +27,12 @@ import io.micrometer.core.instrument.MeterRegistry;
 @RestController
 @RequestMapping("/api/v1/runs")
 public class RunEventController {
+    /**
+     * 心跳间隔必须明显小于前端的 SSE 读超时，否则健康连接会被前端判成"代理缓冲了 SSE"
+     * 并永久降级到轮询。历史上这里和前端一样是 15 秒，两边相等会让每次心跳都与超时赛跑。
+     * 当前约定：服务端 10 秒心跳，前端 25 秒读超时。
+     */
+    private static final long HEARTBEAT_INTERVAL_MS = 10_000;
     private final RunEventRepository events;
     private final RunEventNotifier notifier;
     private final CommandService commands;
@@ -44,15 +50,25 @@ public class RunEventController {
     @GetMapping(path = "/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     SseEmitter stream(@AuthenticationPrincipal Jwt jwt, @PathVariable String runId,
                       @RequestHeader(value = "Last-Event-ID", defaultValue = "0") long lastEventId) {
-        // START 命令被接受后，首个 Agent state 尚未产生；使用持久化命令验证所有权即可立即订阅。
+        // 只认 run 主人（agent_run 或 START 命令），不认“我是否写过任意命令”。
         commands.assertRunOwner(runId, AuthenticatedUser.id(jwt));
         if (!connectionPermits.tryAcquire()) {
             throw new com.buyforu.agent.concurrency.CommandExceptions.AdmissionRejected(
                     "SSE connection capacity exceeded", 5);
         }
+        if (lastEventId < 0) {
+            connectionPermits.release();
+            throw new IllegalArgumentException("Last-Event-ID cannot be negative");
+        }
+        notifier.retain(runId);
         SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
         java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
-        Runnable release = () -> { if (released.compareAndSet(false, true)) connectionPermits.release(); };
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) {
+                notifier.release(runId);
+                connectionPermits.release();
+            }
+        };
         emitter.onCompletion(release); emitter.onTimeout(release); emitter.onError(ignored -> release.run());
         streams.submit(() -> publish(runId, lastEventId, emitter));
         return emitter;
@@ -66,16 +82,16 @@ public class RunEventController {
                 var batch = events.after(runId, cursor, 100);
                 for (var event : batch) {
                     emitter.send(SseEmitter.event().id(Long.toString(event.eventId())).name(event.eventType())
-                            .data(event.payload()));
+                            .data(Map.of("commandId", event.commandId(), "payload", event.payload())));
                     cursor = event.eventId();
                 }
                 long now = System.currentTimeMillis();
-                if (now - lastHeartbeat >= 15_000) {
+                if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                     emitter.send(SseEmitter.event().name("heartbeat").data(Map.of("time", now)));
                     lastHeartbeat = now;
                 }
-                // 没有新事件时由本地/Redis 通知唤醒；15 秒超时只用于发送心跳。
-                if (batch.isEmpty()) notifier.await(runId, version, Duration.ofSeconds(15));
+                // 没有新事件时由本地/Redis 通知唤醒；心跳间隔一到就发一次保活帧。
+                if (batch.isEmpty()) notifier.await(runId, version, Duration.ofMillis(HEARTBEAT_INTERVAL_MS));
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt(); emitter.complete();

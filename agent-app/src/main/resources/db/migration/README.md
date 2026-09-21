@@ -10,5 +10,7 @@ Flyway 已执行迁移的文件内容（包括注释）不能再修改，否则�
 | `V4__approval_audit.sql` | 为审批增加用户、决定原因和操作者字段 | 待审批记录使用部分索引，便于恢复及过期处理 |
 | `V5__knowledge_audit.sql` | 建立知识更新审计表 | 只保存正文 SHA-256 摘要，不复制完整知识正文 |
 | `V6__concurrency_governance.sql` | 建立持久化命令、run 租约、execution epoch 和 SSE 事件日志 | PostgreSQL 保存事实；Redis 只保存可重建调度索引，`state_version + execution_epoch` 拒绝旧 Worker 写回 |
+| `V7__command_ownership_and_idempotency.sql` | 幂等键改为 (user, run, key) | 幂等键在同一用户的同一 run 内唯一；同 key 不能改请求内容 |
+| `V8__runtime_query_indexes.sql` | 补齐运行时高频查询索引 | 覆盖最近任务、会话消息、审批和 Tool 审计，不修改历史数据 |
 
-修改数据库结构时只能新增更高版本文件，例如 `V7__...sql`，不要回改上述文件。
+修改数据库结构时只能新增更高版本文件，例如 `V9__...sql`，不要回改上述文件。

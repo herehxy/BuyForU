@@ -45,11 +45,24 @@ public final class CommerceModels {
     ) {
     }
 
+    /** 只读库存视图。available 是还能再卖的数量，reserved 是尚未确认的预占。 */
+    public record InventoryItem(
+            String skuId,
+            String name,
+            String brand,
+            String category,
+            Money unitPrice,
+            int availableQuantity,
+            int reservedQuantity
+    ) {
+    }
+
     public record SearchRequest(
             String userId,
             String query,
             String category,
             Money budgetMax,
+            Money budgetMin,
             List<String> excludedBrands,
             Map<String, String> requiredAttributes,
             String addressId,
@@ -65,6 +78,14 @@ public final class CommerceModels {
             if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
             if (quantity > 99) throw new IllegalArgumentException("quantity cannot exceed 99");
             limit = limit <= 0 ? 10 : Math.min(limit, 50);
+        }
+
+        /** 旧调用没有预算下限；保留此重载避免本地 SNAPSHOT 和模块编译顺序不一致。 */
+        public SearchRequest(String userId, String query, String category, Money budgetMax,
+                             List<String> excludedBrands, Map<String, String> requiredAttributes,
+                             String addressId, LocalDate deliveryBy, int quantity, int limit) {
+            this(userId, query, category, budgetMax, null, excludedBrands, requiredAttributes,
+                    addressId, deliveryBy, quantity, limit);
         }
     }
 
@@ -108,11 +129,17 @@ public final class CommerceModels {
         }
     }
 
+    /**
+     * budgetMax / budgetMin 是最终应付合计的上下限，必须由 Commerce 在生成快照时重新校验。
+     * 只在搜索时过滤不足以保证正确性，因为价格、优惠和运费可能在选品后变化。
+     */
     public record PrepareOrderRequest(
             String userId,
             String skuId,
             int quantity,
-            String addressId
+            String addressId,
+            Money budgetMax,
+            Money budgetMin
     ) {
         public PrepareOrderRequest {
             Objects.requireNonNull(userId, "userId");
@@ -120,6 +147,14 @@ public final class CommerceModels {
             Objects.requireNonNull(addressId, "addressId");
             if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
             if (quantity > 99) throw new IllegalArgumentException("quantity cannot exceed 99");
+        }
+
+        public PrepareOrderRequest(String userId, String skuId, int quantity, String addressId) {
+            this(userId, skuId, quantity, addressId, null, null);
+        }
+
+        public PrepareOrderRequest(String userId, String skuId, int quantity, String addressId, Money budgetMax) {
+            this(userId, skuId, quantity, addressId, budgetMax, null);
         }
     }
 
@@ -148,7 +183,11 @@ public final class CommerceModels {
     ) {
     }
 
-    public enum ReservationStatus { ACTIVE, CONSUMED, RELEASED, EXPIRED }
+    /**
+     * 预占的生命周期。RELEASED 与 RELEASED_BY_CANCEL 必须区分：
+     * 前者是"未成交就释放"，后者是"成交后撤销并回补库存"，二者对账口径和指标含义都不同。
+     */
+    public enum ReservationStatus { ACTIVE, CONSUMED, RELEASED, EXPIRED, RELEASED_BY_CANCEL }
 
     /**
      * 最终确认前冻结给用户看的交易快照。
@@ -182,6 +221,22 @@ public final class CommerceModels {
             String snapshotId,
             ApprovalProof approval
     ) {
+    }
+
+    /**
+     * 订单取消命令。取消是订单聚合上的操作，与产生订单的 Run 无关。
+     *
+     * <p>刻意不接受"取消原因"这类自由文本：原因不改变副作用本身，但一旦进入生产的
+     * requestHash，同一订单换个说法重试就会变成 EFFECT_CONFLICT——把一个本该幂等的
+     * 操作变成会报错的操作。审计链已由 Outbox 事件与 MCP 调用审计覆盖。</p>
+     */
+    public record CancelOrderCommand(String orderId, String userId) {
+        public CancelOrderCommand {
+            Objects.requireNonNull(orderId, "orderId");
+            Objects.requireNonNull(userId, "userId");
+            if (orderId.isBlank()) throw new IllegalArgumentException("orderId is required");
+            if (userId.isBlank()) throw new IllegalArgumentException("userId is required");
+        }
     }
 
     public record Order(

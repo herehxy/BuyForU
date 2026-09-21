@@ -45,18 +45,20 @@ public class SecurityConfiguration {
     }
 
     @Bean
-    SecurityFilterChain apiSecurity(HttpSecurity http, RedisAdmissionController admission) throws Exception {
+    SecurityFilterChain apiSecurity(HttpSecurity http, RedisAdmissionController admission,
+                                    ClientAddressResolver clientAddresses) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/prometheus").hasRole("monitoring")
                         .requestMatchers("/internal/**").hasRole("knowledge-admin")
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(resource -> resource.jwt(jwt -> jwt
                         .jwtAuthenticationConverter(authoritiesConverter())))
-                .addFilterAfter(new ReadRateLimitFilter(admission), BearerTokenAuthenticationFilter.class)
+                .addFilterAfter(new ReadRateLimitFilter(admission, clientAddresses), BearerTokenAuthenticationFilter.class)
                 .build();
     }
 

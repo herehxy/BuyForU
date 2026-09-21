@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BuyForU 代码 Review 报告（2026-09-01）</title>
+<style>
+  :root { --bg:#f7f8fa; --surface:#fff; --border:#e4e7ec; --text:#1f2329; --muted:#646a73;
+          --accent:#2563eb; --ok:#16a34a; --warn:#d97706; --high:#dc2626; --code:#f3f4f6; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; line-height:1.7; padding:32px 16px; }
+  .container { max-width:980px; margin:0 auto; }
+  header { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px 32px; margin-bottom:24px; }
+  h1 { font-size:24px; margin-bottom:8px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; vertical-align:middle; }
+  .badge.ok { background:#ecfdf5; color:var(--ok); } .badge.warn { background:#fffbeb; color:var(--warn); }
+  section { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 28px; margin-bottom:20px; }
+  h2 { font-size:18px; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid var(--border); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { background:#fafbfc; font-weight:600; white-space:nowrap; }
+  code { background:var(--code); border-radius:4px; padding:1px 6px; font-size:13px; font-family:"SF Mono",Menlo,monospace; }
+  pre { background:var(--code); border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; font-family:"SF Mono",Menlo,monospace; line-height:1.6; }
+  ul,ol { padding-left:22px; margin:8px 0; } li { margin:4px 0; }
+  .sev { display:inline-block; padding:1px 8px; border-radius:4px; font-size:12px; font-weight:700; }
+  .sev-p1 { background:#fee2e2; color:var(--high); } .sev-p2 { background:#fef3c7; color:var(--warn); } .sev-p3 { background:#e0e7ff; color:var(--accent); }
+  .note { background:#eff6ff; border-left:4px solid var(--accent); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  .callout { background:#fffbeb; border-left:4px solid var(--warn); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  footer { color:var(--muted); font-size:12px; text-align:center; margin-top:24px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>BuyForU 代码 Review 报告 <span class="badge ok">151 测试全部通过</span></h1>
+  <div class="meta">生成：2026-09-01 ｜ 基线 HEAD：<code>0d96ffc</code>（2026-08-24）｜ 分支：<code>fix/correctness-and-acceptance</code> ｜ 接续 2026-08-25 审查</div>
+</header>
+
+<section>
+  <h2>1. 结论摘要</h2>
+  <p>自上次审查（2026-08-25）以来，<strong>生产代码零改动，新增 8 个测试类共 108 个测试</strong>，测试总量从 43 增长至 <strong>151</strong>，全量构建 <code>BUILD SUCCESS</code>、0 失败。新增测试质量良好，普遍采用 <code>@Nested</code> 分组，覆盖值对象校验、异常映射、规划逻辑纠正等纯逻辑层。</p>
+  <p>本次发现 <strong>1 个 P2 遗留缺陷仍未修复</strong>（heartbeat 90 秒硬阈值与 PLANNING 期限 210 秒矛盾），并新增一个关键判断：<strong>现有测试已将该错误行为固化为断言</strong>，使其从"未被发现的缺陷"升级为"被测试保护的缺陷"。此外发现 1 处违反项目自身代码规范的问题。</p>
+</section>
+
+<section>
+  <h2>2. 审查范围与基线</h2>
+  <table>
+    <tr><th>项</th><th>状态</th></tr>
+    <tr><td>HEAD 提交</td><td><code>0d96ffc</code>（2026-08-24 09:57），与 8-25 审查时一致，<strong>未产生新提交</strong></td></tr>
+    <tr><td>生产代码改动</td><td><strong>无</strong>（工作区未修改任何 <code>src/main</code> 文件）</td></tr>
+    <tr><td>新增测试</td><td>8 个测试类（全部 untracked，尚未纳入版本控制）</td></tr>
+    <tr><td>配置改动</td><td><code>commerce-port/pom.xml</code> 增加 <code>junit-jupiter</code> test 作用域依赖</td></tr>
+  </table>
+  <div class="note">本次"最新代码"= HEAD 生产代码 + 工作区 8 个新增测试类。因此本次审查的重心是<strong>新增测试的质量与覆盖分布</strong>，以及<strong>上次遗留缺陷的修复状态</strong>。</div>
+</section>
+
+<section>
+  <h2>3. 测试验证结果（实测）</h2>
+  <table>
+    <tr><th>模块</th><th>测试数</th><th>失败</th><th>较 8-25 变化</th></tr>
+    <tr><td>commerce-port</td><td>30</td><td>0</td><td>+30（新增模块测试）</td></tr>
+    <tr><td>commerce-service</td><td>13</td><td>0</td><td>持平</td></tr>
+    <tr><td>agent-app</td><td>108</td><td>0</td><td>+78</td></tr>
+    <tr><td><strong>合计</strong></td><td><strong>151</strong></td><td><strong>0</strong></td><td><strong>+108</strong></td></tr>
+  </table>
+
+  <h3>新增测试类明细</h3>
+  <table>
+    <tr><th>测试类</th><th>测试数</th><th>覆盖内容</th></tr>
+    <tr><td><code>CommerceModelsTest</code>（commerce-port）</td><td>30</td><td>Money / SearchRequest / QuoteRequest / PrepareOrderRequest / EffectContext 等值对象防御性校验</td></tr>
+    <tr><td><code>SpringAiPlanningModelLogicTest</code></td><td>23</td><td>预算方向纠正（上下限关键词识别）、品类推断、约束放宽合并规则</td></tr>
+    <tr><td><code>ApiExceptionHandlerTest</code></td><td>17</td><td>异常→HTTP 状态码映射，含异常消息脱敏（防泄漏内部信息、路径穿越）</td></tr>
+    <tr><td><code>ClientAddressResolverTest</code></td><td>10</td><td>客户端地址解析（代理头、X-Forwarded-For 等）</td></tr>
+    <tr><td><code>DeliveryAddressServiceTest</code></td><td>8</td><td>配送地址服务</td></tr>
+    <tr><td><code>PlanSpecDefaultsTest</code></td><td>8</td><td>PlanSpec 默认值与规范化</td></tr>
+    <tr><td><code>ExecutionContextTest</code></td><td>6</td><td>ThreadLocal 作用域、嵌套调用恢复、异常时清理、版本递增</td></tr>
+    <tr><td><code>ReplanControllerTest</code></td><td>6</td><td>三级失败策略全分支（候选降级 / 搜索重试 / 约束放宽）</td></tr>
+  </table>
+
+  <div class="note"><strong>关于 <code>@Nested</code> 的统计口径澄清：</strong>Surefire 会为使用 <code>@Nested</code> 的外层类生成一行 <code>Tests run: 0</code>，这只是外层类自身的汇总（其内无直接 <code>@Test</code>），<strong>不代表内部类未执行</strong>。实测单独运行 <code>ApiExceptionHandlerTest</code> 时，三个内部类共 17 个测试全部执行并通过。审查中若仅看外层报告行，极易误判为"测试未运行"。</div>
+</section>
+
+<section>
+  <h2>4. 新发现问题</h2>
+
+  <h3><span class="sev sev-p2">P2</span> heartbeat 90 秒硬阈值缺陷仍未修复，且已被测试固化</h3>
+  <p><strong>位置：</strong><code>CommandWorker.java:91</code>（阈值）与 <code>237–239</code>（<code>shouldRenewLease</code>）；期限定义见 <code>CommandService.java:52–56</code>。</p>
+  <p><strong>矛盾事实：</strong></p>
+  <pre>CommandService.java:52-56   PLANNING 期限 = 210s / TRANSACTION = 50s / CONTROL = 15s
+CommandWorker.java:91       Instant staleBefore = Instant.now().minusSeconds(90);   // 硬编码
+CommandWorker.java:237      shouldRenewLease(startedAt, staleBefore)                // 用首次开始时间判定</pre>
+  <p><strong>影响：</strong>PLANNING 命令允许 210 秒，但运行满 90 秒即被 <code>inFlight.cancel + worker.interrupt()</code> 强制中断。慢模型响应或三级 Replan 场景下，本可成功的规划会在 90–210 秒窗口内被误杀，重试 3 次后进入 EXPIRED。TRANSACTION（50s）与 CONTROL（15s）不受影响。</p>
+  <div class="callout"><strong>本次新增的关键判断：</strong><code>CommandWorkerTest.staleOrMissingStartTimeControlsLeaseRenewal</code> 中的断言 <code>assertFalse(shouldRenewLease(startedAt 早于阈值 30s, staleBefore))</code> 已将"按首次开始时间判定"这一错误语义<strong>固化为预期行为</strong>。这意味着该缺陷从"未被测试发现"升级为"被测试保护"——任何修复都必须同步修改此测试，否则会立即失败。这是本次审查中最需要注意的一点。</div>
+  <p><strong>建议修复：</strong>① 卡住判定改用命令期限 <code>deadlineAt</code>（到期才停止续租），或改用 lease 最后心跳时间（与 <code>recoverExpired</code> 的陈旧语义对齐）；② 将 90 秒阈值配置化；③ 同步修正 <code>CommandWorkerTest</code> 的断言，并补充"运行 90–210 秒仍在正常进展的命令不被中断"的用例。</p>
+
+  <h3><span class="sev sev-p3">P3</span> 违反项目自身声明的规范：魔法数字散落</h3>
+  <p><code>ConcurrencyProperties.java</code> 类注释明确承诺：<em>"所有容量参数均可通过环境变量调整，代码中不散落不可运维的魔法数字。"</em></p>
+  <p>而 <code>CommandWorker.java:91</code> 的 <code>minusSeconds(90)</code> 正是一个散落在代码中的魔法数字，且未纳入 <code>ConcurrencyProperties</code>。这使该参数无法运维调整，也是 P2 长期未被发现的直接原因——期限常量集中在 <code>CommandService</code>，而中断阈值孤立在 <code>CommandWorker</code>，两者无任何引用关系可供校验。</p>
+  <p><strong>建议：</strong>新增 <code>staleCommandThreshold</code> 配置项，并让 <code>CommandWorker</code> 与 <code>CommandService</code> 的期限常量共享同一配置源。</p>
+</section>
+
+<section>
+  <h2>5. 覆盖分布观察（非缺陷，属投入产出建议）</h2>
+  <p>新增的 108 个测试<strong>全部为无需外部依赖的纯单元测试</strong>——这是合理的工程选择，保证 CI 稳定。但从风险分布看，存在结构性偏斜：</p>
+  <table>
+    <tr><th>风险层级</th><th>本次覆盖变化</th><th>评估</th></tr>
+    <tr><td>值对象 / DTO 校验</td><td>显著增强（+30）</td><td>低风险区，收益边际递减</td></tr>
+    <tr><td>规划纯逻辑</td><td>显著增强（+23）</td><td>中风险区，预算方向纠正是真实历史缺陷，值得覆盖</td></tr>
+    <tr><td>API 异常映射与脱敏</td><td>增强（+17）</td><td>安全相关，有实际价值</td></tr>
+    <tr><td><strong>并发治理（租约 / fencing）</strong></td><td><strong>无变化</strong>（<code>CommandWorkerTest</code> 仍仅 2 个）</td><td><strong>高风险区，正是 P2 所在</strong></td></tr>
+    <tr><td><strong>崩溃恢复 / 交易一致性</strong></td><td><strong>无变化</strong>（仍在 <code>-Pintegration</code>，需 Docker）</td><td><strong>高风险区，且上次审查标注未执行</strong></td></tr>
+  </table>
+  <p><strong>判断：</strong>测试数量的增长集中在低风险区，而 P2 所在的高风险区覆盖未同步增强。这解释了为何 90 秒阈值缺陷能穿过 151 个测试仍然存在——<strong>覆盖面扩大不等于高风险路径被验证</strong>。下一步的测试投入应优先指向并发治理与崩溃恢复。</p>
+</section>
+
+<section>
+  <h2>6. 新增测试的质量优点</h2>
+  <ul>
+    <li><strong>结构化清晰</strong>：普遍使用 <code>@Nested</code> 按主题分组（如 <code>MoneyValidation</code>、<code>CorrectBudgetDirection</code>），可读性和可定位性明显优于扁平测试方法。</li>
+    <li><strong>断言有安全意图</strong>：<code>ApiExceptionHandlerTest</code> 不仅验证状态码，还验证异常消息不泄漏内部细节、路径穿越串被替换为通用提示——这是把安全不变量写成测试，而非仅验证正常路径。</li>
+    <li><strong>覆盖异常分支</strong>：<code>ExecutionContextTest</code> 显式验证"抛异常后 ThreadLocal 仍被清理"和"嵌套调用后外层上下文被恢复"，这是 ThreadLocal 使用中最易出错的两处。</li>
+    <li><strong>边界值完整</strong>：<code>CommerceModelsTest</code> 对金额精度（10.999→11.00）、数量为 0 / &gt;99、limit 上限 50 等边界均有断言。</li>
+    <li><strong>全分支覆盖</strong>：<code>ReplanControllerTest</code> 覆盖三级降级策略的所有分支，包括"策略禁用"与"零次重试"等退化配置。</li>
+  </ul>
+</section>
+
+<section>
+  <h2>7. 建议（按优先级）</h2>
+  <ol>
+    <li><strong>修复 P2</strong>：将卡住判定从 <code>startedAt</code> 改为 <code>deadlineAt</code>（或 lease 最后心跳时间），阈值配置化，并<strong>同步修正 <code>CommandWorkerTest</code> 中固化错误行为的断言</strong>。这是当前唯一影响正确性的缺陷。</li>
+    <li><strong>补充高风险区测试</strong>：为"运行 90–210 秒仍在进展的 PLANNING 命令不被中断"补一条回归测试；后续测试投入优先指向并发治理与崩溃恢复，而非继续扩充值对象校验。</li>
+    <li><strong>提交现有改动</strong>：8 个测试类与 <code>commerce-port/pom.xml</code> 目前均为未跟踪状态，建议尽快纳入版本控制，避免工作区丢失导致 108 个测试成果损失。</li>
+    <li><strong>执行一次集成测试</strong>：<code>./mvnw -Pintegration verify</code> 在 Docker 可用时仍未执行，这是唯一能验证高并发与崩溃恢复真实行为的路径。</li>
+    <li><strong>规范收敛</strong>：将 90 秒阈值迁入 <code>ConcurrencyProperties</code>，兑现"不散落魔法数字"的承诺。</li>
+  </ol>
+  <div class="note">本报告基于实测构建（<code>./mvnw test</code> → BUILD SUCCESS，151/151 通过）。P2 修复建议遵循项目维护规则：先写失败场景与不变量，再改代码与测试。</div>
+</section>
+
+<footer>BuyForU 代码 Review ｜ 2026-09-01 ｜ 由 WorkBuddy 生成 ｜ 基线 HEAD 0d96ffc + 工作区未提交测试</footer>
+</div>
+</body>
+</html>

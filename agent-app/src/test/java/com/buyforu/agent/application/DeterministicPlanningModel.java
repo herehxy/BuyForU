@@ -11,16 +11,18 @@ public final class DeterministicPlanningModel implements PlanningModel {
         PlanSpec plan = createPlan(request, constraints);
         var c = plan.normalizedConstraints();
         return new PlanSpec(plan.intentType(), new PlanSpec.ShoppingConstraints(c.query(), c.category(), c.budgetMax(),
+                c.budgetMin(),
                 c.preferredBrands(), c.excludedBrands(), c.requiredAttributes(), c.quantity(), c.addressId(),
                 c.deliveryBy(), c.version() + 1), plan.clarification(), PlanSpec.SearchStrategy.HYBRID,
                 plan.readTasks(), plan.rankingPreferences(), plan.fallbackPolicy(), "search replan " + attempt);
     }
 
     @Override
-    public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints, String instruction) {
+    public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints, String instruction,
+                                      java.util.List<String> fields) {
         PlanSpec base = createPlan(request, constraints);
         var c = base.normalizedConstraints();
-        return new PlanSpec(base.intentType(), new PlanSpec.ShoppingConstraints(c.query(), c.category(), null,
+        return new PlanSpec(base.intentType(), new PlanSpec.ShoppingConstraints(c.query(), c.category(), null, null,
                 c.preferredBrands(), c.excludedBrands(), c.requiredAttributes(), c.quantity(), c.addressId(),
                 c.deliveryBy(), c.version() + 1), base.clarification(), base.searchStrategy(), base.readTasks(),
                 base.rankingPreferences(), base.fallbackPolicy(), "explicit relaxation");

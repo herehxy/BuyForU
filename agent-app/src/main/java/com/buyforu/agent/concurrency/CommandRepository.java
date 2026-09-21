@@ -20,9 +20,11 @@ public class CommandRepository {
 
     public CommandRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
-    public Optional<AgentCommand> findByIdempotency(String userId, String key) {
-        return jdbc.query("SELECT * FROM agent_schema.agent_command WHERE user_id=? AND idempotency_key=?",
-                (rs, row) -> map(rs), userId, key).stream().findFirst();
+    public Optional<AgentCommand> findByIdempotency(String userId, String runId, String key) {
+        return jdbc.query("""
+                SELECT * FROM agent_schema.agent_command
+                WHERE user_id=? AND run_id=? AND idempotency_key=?
+                """, (rs, row) -> map(rs), userId, runId, key).stream().findFirst();
     }
 
     public Optional<AgentCommand> findOwned(UUID commandId, String userId) {
@@ -35,11 +37,36 @@ public class CommandRepository {
                 (rs, row) -> map(rs), commandId).stream().findFirst();
     }
 
+    /**
+     * 主人只认业务 run 行，或尚未落库时的 START 命令。
+     * 不能用“该用户是否写过任意命令”，否则攻击者先插一条 CANCEL 就能订阅 SSE。
+     */
+    public Optional<String> runOwner(String runId) {
+        return jdbc.query("""
+                SELECT user_id FROM agent_schema.agent_run WHERE run_id=?
+                UNION ALL
+                SELECT user_id FROM agent_schema.agent_command
+                WHERE run_id=? AND command_type='START'
+                LIMIT 1
+                """, (rs, row) -> rs.getString(1), runId, runId).stream().findFirst();
+    }
+
     public boolean ownsRun(String runId, String userId) {
-        Integer count = jdbc.queryForObject("""
-                SELECT count(*) FROM agent_schema.agent_command WHERE run_id=? AND user_id=?
-                """, Integer.class, runId, userId);
+        return runOwner(runId).filter(userId::equals).isPresent();
+    }
+
+    public boolean runStateExists(String runId) {
+        Integer count = jdbc.queryForObject(
+                "SELECT count(*) FROM agent_schema.agent_run WHERE run_id=?", Integer.class, runId);
         return count != null && count > 0;
+    }
+
+    public int pendingControlCount(String userId) {
+        Integer count = jdbc.queryForObject("""
+                SELECT count(*) FROM agent_schema.agent_command
+                WHERE user_id=? AND queue_class='CONTROL' AND status IN ('QUEUED','RUNNING','RETRY_WAIT')
+                """, Integer.class, userId);
+        return count == null ? 0 : count;
     }
 
     @Transactional
@@ -56,6 +83,7 @@ public class CommandRepository {
         return command;
     }
 
+    /** 重建调度索引时按创建时间捞待执行命令；调用方一次扫完全部有界队列即可。 */
     public List<AgentCommand> queuedWithoutIndex(AgentCommand.QueueClass lane, int limit) {
         return jdbc.query("""
                 SELECT * FROM agent_schema.agent_command
@@ -64,44 +92,117 @@ public class CommandRepository {
                 """, (rs, row) -> map(rs), lane.name(), limit);
     }
 
+    /** 跳过租约还在别人手里的 run，避免队头一条 CANCEL 堵住所有人的取消。 */
     public List<AgentCommand> controlReady(int limit) {
         return jdbc.query("""
-                SELECT * FROM agent_schema.agent_command
-                WHERE queue_class='CONTROL' AND status='QUEUED' AND available_at<=now()
-                ORDER BY created_at LIMIT ?
+                SELECT c.*
+                FROM agent_schema.agent_command c
+                WHERE c.queue_class='CONTROL'
+                  AND c.status='QUEUED'
+                  AND c.available_at<=now()
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_schema.agent_run_execution x
+                      WHERE x.run_id=c.run_id
+                        AND x.active_command_id IS NOT NULL
+                        AND x.lease_until>now()
+                        AND x.active_command_id<>c.command_id
+                  )
+                ORDER BY c.created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT ?
                 """, (rs, row) -> map(rs), limit);
     }
 
-    public void markSucceeded(UUID commandId, CommandStatus status, Long stateVersion) {
-        jdbc.update("""
+    // 终态迁移一律返回影响行数。这些 SQL 都带状态前置条件，命中 0 行意味着命令已被
+    // 别的路径改写（租约恢复、取消、更早的失败），调用方据此决定还要不要对外发终态事件。
+
+    public int markSucceeded(UUID commandId, CommandStatus status, Long stateVersion) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status=?,result_state_version=?,completed_at=now(),
                     error_code=NULL,error_detail=NULL WHERE command_id=? AND status='RUNNING'
                 """, status.name(), stateVersion, commandId);
     }
 
-    public void markFailed(UUID commandId, String code, String detail) {
-        jdbc.update("""
+    public int markFailed(UUID commandId, String code, String detail) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,error_detail=?,completed_at=now()
                 WHERE command_id=? AND status='RUNNING'
                 """, code, truncate(detail), commandId);
     }
 
-    public void markExpired(UUID commandId) {
-        jdbc.update("""
+    /**
+     * 栅栏拒绝专用：只终止"仍属于自己这个 epoch"的 RUNNING 命令。
+     *
+     * <p>{@code StaleExecution} 的含义是"本执行实例失去了写权限"，而不是"命令已经结束"。
+     * 命令很可能已被更高 epoch 的实例接管并正在执行——此时若无条件 {@code markFailed}，
+     * 输家会把赢家正在跑的 RUNNING 直接判死，赢家稍后的完成迁移再命中 0 行，
+     * 结果是一条已经产生副作用的命令以 STALE_EXECUTION 收尾，且拿不到自己的终态事件。</p>
+     *
+     * <p>epoch 传 null 时退化为不校验 epoch，仅用于调用方拿不到租约的兜底路径。</p>
+     */
+    public int markFencedOut(UUID commandId, Long staleEpoch, String code, String detail) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,error_detail=?,completed_at=now()
+                WHERE command_id=? AND status='RUNNING' AND (?::bigint IS NULL OR execution_epoch=?)
+                """, code, truncate(detail), commandId, staleEpoch, staleEpoch);
+    }
+
+    public int markExpired(UUID commandId) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='EXPIRED',error_code='COMMAND_DEADLINE_EXCEEDED',
                     completed_at=now() WHERE command_id=? AND status IN ('QUEUED','RETRY_WAIT')
                 """, commandId);
     }
 
-    public void markAdmissionRejected(UUID commandId, String code) {
-        jdbc.update("""
+    public int markAdmissionRejected(UUID commandId, String code) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='FAILED',error_code=?,completed_at=now()
                 WHERE command_id=? AND status='QUEUED'
                 """, code, commandId);
     }
 
-    public void retryLater(UUID commandId, Instant availableAt, String code, String detail) {
-        jdbc.update("""
+    /** 取消先终止尚未领取的业务命令；正在执行的命令由 cancel_requested + Future interrupt 处理。 */
+    public int cancelPendingForRun(String runId) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='CANCELLED',error_code='RUN_CANCEL_REQUESTED',
+                    completed_at=now()
+                WHERE run_id=? AND queue_class<>'CONTROL' AND status IN ('QUEUED','RETRY_WAIT')
+                """, runId);
+    }
+
+    public int markCancelled(UUID commandId, String code) {
+        return jdbc.update("""
+                UPDATE agent_schema.agent_command SET status='CANCELLED',error_code=?,completed_at=now()
+                WHERE command_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT')
+                """, code, commandId);
+    }
+
+    /**
+     * 租约已失效、但仍停在 RUNNING 的命令——也就是 {@code RunLeaseRepository.recoverExpired}
+     * 即将翻成 RETRY_WAIT / EXPIRED 的那一批。
+     *
+     * <p>判据必须与 recoverExpired 第二条条件更新保持一致。那里是
+     * {@code status='RUNNING' AND NOT EXISTS (活跃租约)}；第一条更新（活跃租约已过期）是它的子集，
+     * 所以这里的并集正好化简成同一个判据，不必把两条 SQL 的谓词再抄一遍。</p>
+     *
+     * <p>调用方用它来"先放用户许可、后翻状态"。候选集合允许比实际恢复范围更宽
+     * （多放一个许可只让同一用户的另一条命令更早开始），但不能更窄。</p>
+     */
+    public List<AgentCommand> recoverableCommands(int limit) {
+        return jdbc.query("""
+                SELECT * FROM agent_schema.agent_command c
+                WHERE c.status='RUNNING'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_schema.agent_run_execution x
+                      WHERE x.active_command_id=c.command_id AND x.lease_until>now()
+                  )
+                ORDER BY c.created_at
+                LIMIT ?
+                """, (rs, row) -> map(rs), limit);
+    }
+
+    public int retryLater(UUID commandId, Instant availableAt, String code, String detail) {
+        return jdbc.update("""
                 UPDATE agent_schema.agent_command SET status='RETRY_WAIT',available_at=?,error_code=?,error_detail=?
                 WHERE command_id=? AND status='RUNNING'
                 """, Timestamp.from(availableAt), code, truncate(detail), commandId);
