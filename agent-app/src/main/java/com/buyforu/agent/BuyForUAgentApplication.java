@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import com.buyforu.agent.concurrency.ConcurrencyProperties;
+import com.buyforu.agent.infrastructure.retention.AuditRetentionProperties;
 
 /**
  * Agent 服务启动入口。
@@ -16,7 +17,7 @@ import com.buyforu.agent.concurrency.ConcurrencyProperties;
  */
 @SpringBootApplication
 @EnableScheduling
-@EnableConfigurationProperties(ConcurrencyProperties.class)
+@EnableConfigurationProperties({ConcurrencyProperties.class, AuditRetentionProperties.class})
 public class BuyForUAgentApplication {
     public static void main(String[] args) {
         SpringApplication.run(BuyForUAgentApplication.class, args);

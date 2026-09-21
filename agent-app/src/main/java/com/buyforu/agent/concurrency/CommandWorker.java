@@ -139,10 +139,9 @@ public class CommandWorker {
                 : HeartbeatOutcome.LEASE_LOST;
     }
 
-    @Scheduled(fixedDelay = 3600000, scheduler = "maintenanceScheduler")
-    void cleanEvents() {
-        while (events.deleteOlderThan(Instant.now().minusSeconds(7 * 86400L), 1000) == 1000) { }
-    }
+    // 审计数据清理已迁出：见 infrastructure.retention.AuditRetentionJob。
+    // 原先这里硬编码 7 天窗口删 agent_run_event，而 tool_call 完全没有保留策略；
+    // 现在两张表的窗口统一由 buyforu.retention.* 配置，并走独立的 retentionScheduler。
 
     /**
      * 恢复顺序不能颠倒：必须先放用户许可，再让命令翻回可派发状态。

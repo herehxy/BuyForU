@@ -25,6 +25,15 @@ public class SchedulingConfiguration {
         return scheduler("buyforu-maint-", 1);
     }
 
+    /**
+     * 审计清理单独一条线程：保留窗口拉长到 90 天后，首轮批量删除会明显变长，
+     * 不能让它和队列重建共用 maintenanceScheduler 把彼此堵住。
+     */
+    @Bean(destroyMethod = "shutdown")
+    ThreadPoolTaskScheduler retentionScheduler() {
+        return scheduler("buyforu-retention-", 1);
+    }
+
     private static ThreadPoolTaskScheduler scheduler(String prefix, int poolSize) {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(poolSize);
