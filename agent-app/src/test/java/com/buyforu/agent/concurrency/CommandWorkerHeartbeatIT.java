@@ -92,16 +92,35 @@ class CommandWorkerHeartbeatIT {
         assertEquals(before, leaseUntil(command.runId()), "停止续租后 lease_until 不应变化");
     }
 
-    /** 边界：期限恰好等于当前时刻即视为届满，与 shouldRenewLease 的严格大于语义一致。 */
+    /**
+     * 边界：期限恰好等于当前时刻即视为届满，与 {@code shouldRenewLease} 的严格大于语义一致。
+     *
+     * <p>判定的 {@code now} 必须取<b>库里读回来的那一列</b>，不能用
+     * {@code acceptedAt.plus(PLANNING_DEADLINE)} 重新算一个。两个理由：</p>
+     * <ol>
+     *   <li>生产判定读的就是 {@code commands.find(id).deadlineAt()}，拿持久化值当真值更忠实；</li>
+     *   <li>重新算出来的值会引入一个<b>只在 Linux 上出现的假红</b>：Linux 的
+     *       {@code Instant.now()} 有纳秒精度，而 {@code timestamptz} 只存微秒，
+     *       落库时纳秒被舍入，重新算的 now 可能比落库值早不到 1 微秒 —— 于是
+     *       {@code deadlineAt.isAfter(now)} 成立，判定变成 RENEWED。
+     *       macOS 的 {@code Instant.now()} 本身就是微秒精度，所以在开发机上永远看不到这个红。</li>
+     * </ol>
+     */
     @Test
     void stopsExactlyAtTheDeadline() {
         Instant acceptedAt = Instant.now();
         AgentCommand command = insertPlanningCommand(acceptedAt);
         RunLeaseRepository.Lease lease = claim(command, acceptedAt);
 
-        Instant deadlineAt = acceptedAt.plus(PLANNING_DEADLINE);
+        Instant persistedDeadline = deadlineOf(command.commandId());
         assertEquals(CommandWorker.HeartbeatOutcome.STOP,
-                worker.renewLease(command.commandId(), lease, deadlineAt));
+                worker.renewLease(command.commandId(), lease, persistedDeadline));
+
+        // 反向一并钉住：早一纳秒就必须续租 —— 判据是严格的 isAfter，边界精确到纳秒。
+        // 这同时解释了上一条为什么不能自己重算 now：测试侧重算的值只要比落库值早哪怕 1 纳秒，
+        // 结果就从 STOP 翻成 RENEWED。
+        assertEquals(CommandWorker.HeartbeatOutcome.RENEWED,
+                worker.renewLease(command.commandId(), lease, persistedDeadline.minusNanos(1)));
     }
 
     /** 用户取消优先于期限：只要 cancel_requested 为真，哪怕期限还很宽裕也必须停。 */
@@ -201,6 +220,14 @@ class CommandWorkerHeartbeatIT {
         Timestamp value = jdbc.queryForObject(
                 "SELECT lease_until FROM agent_schema.agent_run_execution WHERE run_id=?",
                 Timestamp.class, runId);
+        return value == null ? null : value.toInstant();
+    }
+
+    /** 读回持久化的期限，与生产中判定所依据的列完全一致。 */
+    private Instant deadlineOf(UUID commandId) {
+        Timestamp value = jdbc.queryForObject(
+                "SELECT deadline_at FROM agent_schema.agent_command WHERE command_id=?",
+                Timestamp.class, commandId);
         return value == null ? null : value.toInstant();
     }
 
