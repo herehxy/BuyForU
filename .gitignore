@@ -11,3 +11,5 @@ web/dist/
 .DS_Store
 reports/k6/
 .workbuddy/
+.claude/
+.VSCodeCounter/
