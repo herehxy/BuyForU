@@ -183,7 +183,11 @@ public final class CommerceModels {
     ) {
     }
 
-    public enum ReservationStatus { ACTIVE, CONSUMED, RELEASED, EXPIRED }
+    /**
+     * 预占的生命周期。RELEASED 与 RELEASED_BY_CANCEL 必须区分：
+     * 前者是"未成交就释放"，后者是"成交后撤销并回补库存"，二者对账口径和指标含义都不同。
+     */
+    public enum ReservationStatus { ACTIVE, CONSUMED, RELEASED, EXPIRED, RELEASED_BY_CANCEL }
 
     /**
      * 最终确认前冻结给用户看的交易快照。
@@ -217,6 +221,22 @@ public final class CommerceModels {
             String snapshotId,
             ApprovalProof approval
     ) {
+    }
+
+    /**
+     * 订单取消命令。取消是订单聚合上的操作，与产生订单的 Run 无关。
+     *
+     * <p>刻意不接受"取消原因"这类自由文本：原因不改变副作用本身，但一旦进入生产的
+     * requestHash，同一订单换个说法重试就会变成 EFFECT_CONFLICT——把一个本该幂等的
+     * 操作变成会报错的操作。审计链已由 Outbox 事件与 MCP 调用审计覆盖。</p>
+     */
+    public record CancelOrderCommand(String orderId, String userId) {
+        public CancelOrderCommand {
+            Objects.requireNonNull(orderId, "orderId");
+            Objects.requireNonNull(userId, "userId");
+            if (orderId.isBlank()) throw new IllegalArgumentException("orderId is required");
+            if (userId.isBlank()) throw new IllegalArgumentException("userId is required");
+        }
     }
 
     public record Order(

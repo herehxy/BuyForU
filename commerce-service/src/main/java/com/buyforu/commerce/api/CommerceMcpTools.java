@@ -90,6 +90,16 @@ public final class CommerceMcpTools {
         return commerce.createOrder(command, effect);
     }
 
+    @McpTool(name = "commerce_order_cancel",
+            description = "Idempotently cancel an order that has not been settled and return its reserved inventory",
+            generateOutputSchema = true)
+    public Order cancelOrder(
+            @McpToolParam(description = "Order to cancel and its owner", required = true) CancelOrderCommand command,
+            @McpToolParam(description = "Mandatory effect and idempotency context", required = true)
+            EffectContext effect) {
+        return commerce.cancelOrder(command, effect);
+    }
+
     @McpTool(name = "commerce_order_find_by_snapshot",
             description = "Find an existing order created from a confirmable snapshot without creating side effects",
             generateOutputSchema = true)
@@ -101,7 +111,18 @@ public final class CommerceMcpTools {
                 .orElseGet(() -> new OrderLookupResult(false, null));
     }
 
+    @McpTool(name = "commerce_order_list",
+            description = "List orders owned by a shopper, newest first, without creating side effects",
+            generateOutputSchema = true)
+    public OrderList listOrders(
+            @McpToolParam(description = "Authenticated shopper", required = true) String userId,
+            @McpToolParam(description = "Maximum number of orders to return", required = false) Integer limit) {
+        return new OrderList(commerce.listOrders(userId, limit == null ? 20 : limit));
+    }
+
     public record ReleaseResult(String reservationId, boolean released) { }
+
+    public record OrderList(java.util.List<Order> orders) { }
 
     public record OrderLookupResult(
             @McpToolParam(description = "Whether an order exists for the snapshot", required = true) boolean found,

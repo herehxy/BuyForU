@@ -20,5 +20,9 @@ public interface CommerceToolClient {
 
     Order orderCreate(CreateOrderCommand command, EffectContext effect);
 
+    Order orderCancel(CancelOrderCommand command, EffectContext effect);
+
     java.util.Optional<Order> orderFindBySnapshot(String userId, String snapshotId);
+
+    java.util.List<Order> orderList(String userId, int limit);
 }

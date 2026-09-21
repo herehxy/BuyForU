@@ -85,6 +85,12 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     }
 
     @Override
+    public Order orderCancel(CancelOrderCommand command, EffectContext effect) {
+        return call("commerce_order_cancel", Map.of(
+                "command", arguments(command), "effect", arguments(effect)), Order.class);
+    }
+
+    @Override
     public java.util.Optional<Order> orderFindBySnapshot(String userId, String snapshotId) {
         OrderLookupResult result = call("commerce_order_find_by_snapshot",
                 Map.of("userId", userId, "snapshotId", snapshotId), OrderLookupResult.class);
@@ -93,6 +99,11 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
             throw new McpContractException("Commerce MCP order lookup returned found=true without an order");
         }
         return java.util.Optional.of(result.order());
+    }
+
+    @Override
+    public List<Order> orderList(String userId, int limit) {
+        return call("commerce_order_list", Map.of("userId", userId, "limit", limit), OrderListResult.class).orders();
     }
 
     private <T> T call(String toolName, Map<String, Object> arguments, Class<T> resultType) {
@@ -153,6 +164,7 @@ public final class SpringMcpCommerceToolClient implements McpCommerceToolClient 
     private record AddressList(List<DeliveryAddress> addresses) { }
     private record InventoryList(List<InventoryItem> items) { }
     private record OrderLookupResult(boolean found, Order order) { }
+    private record OrderListResult(List<Order> orders) { }
 
     /** MCP 服务或传输不可用；消息不携带完整请求/响应，避免命令状态接口泄露业务数据。 */
     public static final class McpInfrastructureException extends RuntimeException {
