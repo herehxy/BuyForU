@@ -1,4 +1,4 @@
-import type { AgentCommand, AgentRun, CommandAccepted, Money } from './types'
+import type { AgentCommand, AgentRun, CommandAccepted, Money, OrderView } from './types'
 import { accessToken } from './auth'
 
 // 唯一的前端请求入口：统一附加 OIDC access token，并把服务端 requestId 带入可见错误。
@@ -46,6 +46,17 @@ export function listInventory(): Promise<InventoryItem[]> {
 
 export function listRuns(): Promise<AgentRun[]> {
   return request('/api/v1/runs')
+}
+
+// 已提交订单每次回到交易系统读取当前状态，不用 Run 快照里的旧状态代替。
+export function listOrders(limit = 20): Promise<OrderView[]> {
+  return request(`/api/v1/orders?limit=${limit}`)
+}
+
+// 撤销待付款订单：幂等键由服务端按 (用户, 订单号) 确定性派生，客户端不提供键。
+// 刷新页面、连点、换标签页重复提交都会命中同一个 effect 并重放结果，不会重复回补库存。
+export function cancelOrder(orderId: string): Promise<OrderView> {
+  return request(`/api/v1/orders/${orderId}/cancellations`, { method: 'POST' })
 }
 
 export function getRun(runId: string): Promise<AgentRun> {

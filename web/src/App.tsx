@@ -1,10 +1,18 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
+// 页面编排：登录门面、商城外壳（导航 + 商品陈列）和 AI 导购面板。
+// 业务逻辑保持原有边界：需求以自然语言提交，价格与订单只由 Commerce 决定。
+import { useEffect, useRef, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { cancelRun, clarify, decide, followRun, getRun, listAddresses, listInventory, listRuns, pendingCommand, phaseLabel, registerAddress, relaxConstraints, selectCandidate, startRun } from './api'
+import { followRun, cancelOrder, getRun, listAddresses, listInventory, listOrders, listRuns, pendingCommand, registerAddress, startRun } from './api'
 import type { DeliveryAddress, InventoryItem } from './api'
-import type { AgentRun, CommandAccepted } from './types'
+import type { AgentRun, CommandAccepted, OrderView } from './types'
 import type { User } from 'oidc-client-ts'
 import { authConfigurationError, userManager } from './auth'
+import { AgentPanel } from './components/AgentPanel'
+import { LoginScreen } from './components/LoginScreen'
+import { NavBar } from './components/NavBar'
+import { OrdersPage } from './components/OrdersPage'
+import { ProductGrid } from './components/ProductGrid'
+import { IMAGE_SOURCE_NOTE } from './productImages'
 
 let callbackInFlight: Promise<User> | undefined
 
@@ -16,18 +24,55 @@ function completeSignInCallback(): Promise<User> {
   return callbackInFlight
 }
 
+const DEFAULT_REQUIREMENT = '帮我找一台 5000 元以内、16GB 内存、明天能到的轻薄本'
+
 export function App() {
   const [user, setUser] = useState<User | null>()
-  const [message, setMessage] = useState('帮我找一台 5000 元以内、16GB 内存、明天能到的轻薄本')
+  const [requirement, setRequirement] = useState(DEFAULT_REQUIREMENT)
+  const [query, setQuery] = useState('')
   const [zone, setZone] = useState('CN-EAST')
   const [address, setAddress] = useState<DeliveryAddress>()
   const [run, setRun] = useState<AgentRun>()
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([])
   const [restoreError, setRestoreError] = useState<string>()
+  const [actionNotice, setActionNotice] = useState<string>()
   const [progress, setProgress] = useState<string>()
   const [stock, setStock] = useState<InventoryItem[]>([])
+  const [showTasks, setShowTasks] = useState(false)
+  const [showOrders, setShowOrders] = useState(false)
+  const [orders, setOrders] = useState<OrderView[]>([])
+  const [ordersLoading, setOrdersLoading] = useState(false)
+  const [ordersError, setOrdersError] = useState<string>()
+  const [focusOrderId, setFocusOrderId] = useState<string>()
   const restoredCommand = useRef<string | undefined>(undefined)
   const refreshStock = () => listInventory().then(setStock).catch(() => undefined)
+
+  // 订单列表每次都回到交易系统读取；失败时保留上一次结果并展示错误，不清空页面。
+  const refreshOrders = () => {
+    setOrdersLoading(true)
+    return listOrders()
+      .then((fetched) => { setOrders(fetched); setOrdersError(undefined) })
+      .catch((failure: unknown) => {
+        setOrdersError(failure instanceof Error ? failure.message : '无法读取订单列表。')
+      })
+      .finally(() => setOrdersLoading(false))
+  }
+
+  const openOrders = (orderId?: string) => {
+    setShowTasks(false)
+    setShowOrders(true)
+    setFocusOrderId(orderId)
+    void refreshOrders()
+  }
+
+  // 撤销走订单聚合，不经过购物图、不占用命令队列；成功后订单状态与可售库存都变了，
+  // 因此两个视图都必须回到交易系统重读，不能用本地推算的结果代替。
+  const cancelOrderById = (orderId: string) => {
+    setOrdersError(undefined)
+    return cancelOrder(orderId)
+      .then(() => refreshStock())
+      .then(() => refreshOrders())
+  }
   const mutation = useMutation({
     mutationFn: async (action: () => Promise<CommandAccepted>) => {
       const accepted = await action()
@@ -63,11 +108,17 @@ export function App() {
     })
   }, [user])
 
+  // 登录后拉一次订单数用于导航角标；失败不影响主流程。
+  useEffect(() => {
+    if (user) void refreshOrders()
+  }, [user])
+
   useEffect(() => {
     if (!userManager) {
       setUser(null)
       return
     }
+
     if (window.location.pathname === '/auth/callback') {
       completeSignInCallback()
         .then((authenticated) => {
@@ -85,258 +136,99 @@ export function App() {
     })
   }, [])
 
-  if (authConfigurationError) return <main className="shell"><div className="error">{authConfigurationError}</div></main>
-  if (user === undefined) return <main className="shell"><p>正在检查登录状态…</p></main>
-  if (!user) return <main className="shell login"><h1>BuyForU</h1><p>登录后才能创建和审批订单。</p>
-    <button onClick={() => userManager!.signinRedirect()}>安全登录</button></main>
+  if (authConfigurationError) {
+    return <LoginScreen onSignIn={() => undefined} configurationError={authConfigurationError} />
+  }
+  if (user === undefined) return <main className="boot">正在检查登录状态…</main>
+  if (!user) return <LoginScreen onSignIn={() => userManager!.signinRedirect()} />
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    if (address) mutation.mutate(() => startRun(message, address.addressId))
+  const userLabel = user.profile?.preferred_username ?? user.profile?.name ?? user.profile?.email ?? '已登录用户'
+
+  // 所有购物需求都以自然语言提交给 Agent；前端不解析条件、不计算金额。
+  const startWith = (message: string) => {
+    if (!address) {
+      setActionNotice('请先在顶部设置收货地，Agent 需要它才能计算到货时间。')
+      return
+    }
+    setActionNotice(undefined)
+    setShowTasks(false)
+    mutation.mutate(() => startRun(message, address.addressId))
   }
 
+  const errors = [actionNotice, restoreError, addressMutation.error?.message, mutation.error?.message]
+    .filter((message): message is string => Boolean(message))
+
   return (
-    <main className="shell">
-      <header>
-        <div className="eyebrow">BUYFORU · SAFE SHOPPING AGENT</div>
-        <h1>把复杂购物，变成一次清楚的决定。</h1>
-        <p>Agent 可以搜索和比较；价格、库存与订单始终由商城系统确认。</p>
-        <button className="secondary" onClick={() => userManager!.signoutRedirect()}>退出登录</button>
-      </header>
+    <div className="shop">
+      <NavBar
+        address={address}
+        zoneCode={zone}
+        registering={addressMutation.isPending}
+        onZoneChange={setZone}
+        onRegisterZone={() => addressMutation.mutate(zone)}
+        query={query}
+        onQueryChange={setQuery}
+        onSearch={() => {
+          if (!query.trim()) return
+          setRequirement(query.trim())
+          startWith(query.trim())
+        }}
+        searchDisabled={mutation.isPending || !query.trim()}
+        taskCount={recentRuns.length}
+        onOpenTasks={() => { setShowOrders(false); setShowTasks(true) }}
+        orderCount={orders.length}
+        onOpenOrders={() => openOrders()}
+        onLogout={() => userManager!.signoutRedirect()}
+        userLabel={userLabel}
+      />
 
-      <form className="composer" onSubmit={submit}>
-        {!address && <div className="address-row">
-          <select value={zone} onChange={(event) => setZone(event.target.value)}>
-            <option value="CN-EAST">华东（预计 1 天）</option>
-            <option value="CN-CENTRAL">华中（预计 2 天）</option>
-            <option value="CN-WEST">西部（预计 3 天）</option>
-          </select>
-          <button type="button" disabled={addressMutation.isPending}
-                  onClick={() => addressMutation.mutate(zone)}>登记配送区域</button>
-        </div>}
-        {address && <p className="address-ok">配送区域已登记：{address.zoneCode}，地址编号 {address.addressId}</p>}
-        <textarea value={message} onChange={(event) => setMessage(event.target.value)} />
-        <button disabled={mutation.isPending || !address}>开始选购</button>
-      </form>
+      {showOrders ? (
+        <OrdersPage
+          orders={orders}
+          stock={stock}
+          loading={ordersLoading}
+          error={ordersError}
+          focusOrderId={focusOrderId}
+          onRefresh={refreshOrders}
+          onCancelOrder={cancelOrderById}
+          onClose={() => { setShowOrders(false); setFocusOrderId(undefined) }}
+        />
+      ) : (
+        <main className="shop-main">
+          <ProductGrid
+            items={stock}
+            busy={mutation.isPending}
+            onAskAgent={(item) => startWith(`帮我买 ${item.name}`)}
+            onRefresh={refreshStock}
+          />
 
-      {addressMutation.error && <div className="error">{addressMutation.error.message}</div>}
-      {mutation.error && <div className="error">{mutation.error.message}</div>}
-      {(mutation.isPending || run) && (
-        <AgentProgress phase={run?.phase} hint={mutation.isPending ? progress : undefined} />
-      )}
-      {restoreError && <div className="error">恢复已有数据失败：{restoreError}</div>}
-      {run && <RunView run={run} busy={mutation.isPending} act={mutation.mutate} />}
-      <InventoryBoard items={stock} onRefresh={refreshStock} />
-      {!run && recentRuns.length > 0 && <section className="history">
-        <h2>最近任务</h2>
-        {recentRuns.map((item) => <button type="button" className="history-item" key={item.runId}
-          onClick={() => getRun(item.runId).then(setRun).catch(() => setRun(item))}>
-          <span>{item.originalRequest}</span><strong>{phaseLabel(item.phase)}</strong>
-        </button>)}
-      </section>}
-    </main>
-  )
-}
-
-function InventoryBoard({ items, onRefresh }: { items: InventoryItem[]; onRefresh: () => void }) {
-  return (
-    <section className="inventory">
-      <div className="inventory-head">
-        <h2>当前库存</h2>
-        <button type="button" className="secondary" onClick={onRefresh}>刷新</button>
-      </div>
-      <p>可售是现在还能买的数量；预占是已锁定、还没下单的件数。下单后预占消失，可售不会加回。</p>
-      <div className="inventory-table">
-        <div className="inventory-row head">
-          <span>SKU</span><span>商品</span><span>品类</span><span>标价</span><span>可售</span><span>预占</span>
-        </div>
-        {items.map((item) => (
-          <div className="inventory-row" key={item.skuId}>
-            <span>{item.skuId}</span>
-            <span>{item.brand} {item.name}</span>
-            <span>{item.category}</span>
-            <span>¥{item.unitPrice.amount}</span>
-            <strong>{item.availableQuantity}</strong>
-            <span>{item.reservedQuantity}</span>
-          </div>
-        ))}
-      </div>
-    </section>
-  )
-}
-
-const PIPELINE = [
-  { match: ['NEW', 'SEARCHING'], label: '理解需求并搜索' },
-  { match: ['NEEDS_CLARIFICATION'], label: '补充信息' },
-  { match: ['PRESENTING_CANDIDATES'], label: '选择商品' },
-  { match: ['PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL'], label: '确认金额' },
-  { match: ['CREATING_ORDER', 'COMPLETED'], label: '创建订单' },
-] as const
-
-function AgentProgress({ phase, hint }: { phase?: string; hint?: string }) {
-  const current = phase ?? 'NEW'
-  return (
-    <section className="progress">
-      <div className="status"><span />{hint || phaseLabel(current)}</div>
-      <ol className="steps">
-        {PIPELINE.map((step) => {
-          const phases = step.match as readonly string[]
-          const active = phases.includes(current)
-          const done = pipelineDone(current, phases[phases.length - 1])
-          return <li key={step.label} className={active ? 'active' : done ? 'done' : ''}>{step.label}</li>
-        })}
-      </ol>
-    </section>
-  )
-}
-
-function pipelineDone(phase: string, stepEnd: string): boolean {
-  const order = ['NEW', 'SEARCHING', 'NEEDS_CLARIFICATION', 'PRESENTING_CANDIDATES',
-    'PREPARING_CONFIRMABLE_ORDER', 'WAITING_APPROVAL', 'CREATING_ORDER', 'COMPLETED']
-  return order.indexOf(phase) > order.indexOf(stepEnd)
-}
-
-const RELAX_FIELDS = [
-  { id: 'budgetMax', label: '预算上限' },
-  { id: 'budgetMin', label: '预算下限' },
-  { id: 'preferredBrands', label: '品牌' },
-  { id: 'requiredAttributes', label: '规格' },
-  { id: 'deliveryBy', label: '送达时间' },
-  { id: 'quantity', label: '数量' },
-  { id: 'query', label: '搜索词' },
-] as const
-
-function RelaxForm({ runId, busy, act }: {
-  runId: string
-  busy: boolean
-  act: (action: () => Promise<CommandAccepted>) => void
-}) {
-  const [relaxation, setRelaxation] = useState('')
-  const [fields, setFields] = useState<string[]>([])
-  const toggle = (id: string) => setFields((current) =>
-    current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
-  return (
-    <form className="clarification" onSubmit={(event) => {
-      event.preventDefault()
-      if (relaxation.trim() && fields.length > 0) {
-        act(() => relaxConstraints(runId, relaxation.trim(), fields))
-      }
-    }}>
-      <h2>当前硬性条件下没有合适商品</h2>
-      <p>先勾选允许改的条件，再写具体要求。没勾选的字段不会动。</p>
-      <div className="address-row">
-        {RELAX_FIELDS.map((field) => (
-          <label key={field.id}>
-            <input type="checkbox" checked={fields.includes(field.id)}
-                   onChange={() => toggle(field.id)} /> {field.label}
-          </label>
-        ))}
-      </div>
-      <textarea value={relaxation} placeholder="例如：预算可以提高到 5500 元"
-                onChange={(event) => setRelaxation(event.target.value)} />
-      <button disabled={busy || !relaxation.trim() || fields.length === 0}>批准这些条件变更</button>
-      <button type="button" className="secondary" disabled={busy}
-              onClick={() => act(() => cancelRun(runId))}>不放宽，取消任务</button>
-    </form>
-  )
-}
-
-function RunView({ run, busy, act }: {
-  run: AgentRun
-  busy: boolean
-  act: (action: () => Promise<CommandAccepted>) => void
-}) {
-  // UI 严格按照后端 phase 显示允许的动作，不能由前端跳过选品或快照确认。
-  const [clarification, setClarification] = useState('')
-  return (
-    <section className="run">
-      <p className="phase-copy">{phaseLabel(run.phase)}</p>
-      {run.lastError && <p className="error">{run.lastError}</p>}
-
-      {run.phase === 'NEEDS_CLARIFICATION' && (
-        <form className="clarification" onSubmit={(event) => {
-          event.preventDefault()
-          if (clarification.trim()) act(() => clarify(run.runId, clarification.trim()))
-        }}>
-          <h2>还需要一点信息</h2>
-          <p>{run.planSpec?.clarification?.question ?? '请补充缺少的购物条件。'}</p>
-          <textarea value={clarification}
-                    onChange={(event) => setClarification(event.target.value)} />
-          <button disabled={busy || !clarification.trim()}>{busy ? '正在处理…' : '继续'}</button>
-          <button type="button" className="secondary" disabled={busy}
-                  onClick={() => act(() => cancelRun(run.runId))}>取消任务</button>
-        </form>
+          <AgentPanel
+            address={address}
+            requirement={requirement}
+            onRequirementChange={setRequirement}
+            onSubmit={() => { if (requirement.trim()) startWith(requirement.trim()) }}
+            busy={mutation.isPending}
+            hint={progress}
+            run={run}
+            errors={errors}
+            act={mutation.mutate}
+            recentRuns={recentRuns}
+            showTasks={showTasks}
+            onOpenRun={(item) => {
+              setShowTasks(false)
+              getRun(item.runId).then(setRun).catch(() => setRun(item))
+            }}
+            onOpenTasks={() => setShowTasks(true)}
+            onCloseTasks={() => setShowTasks(false)}
+            onViewOrders={() => openOrders(run?.finalOrder?.orderId)}
+          />
+        </main>
       )}
 
-      {run.phase === 'PRESENTING_CANDIDATES' && (
-        <div className="grid">
-          {run.candidateSet.map((candidate) => (
-            <article className="card" key={candidate.skuId}>
-              <div className="brand">{candidate.brand}</div>
-              <h2>{candidate.name}</h2>
-              <dl>{Object.entries(candidate.attributes).map(([key, value]) => (
-                <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
-              ))}</dl>
-              <strong>¥{candidate.displayPrice.amount}</strong>
-              <p>{candidate.deliveryDate} 送达 · {candidate.available ? '有货' : '暂时缺货'}</p>
-              <button disabled={busy || !candidate.available}
-                      onClick={() => act(() => selectCandidate(run.runId, candidate.skuId))}>
-                选择并锁定库存
-              </button>
-            </article>
-          ))}
-          <button className="secondary" disabled={busy}
-                  onClick={() => act(() => cancelRun(run.runId))}>没有合适商品，取消任务</button>
-        </div>
-      )}
-
-      {run.phase === 'PREPARING_CONFIRMABLE_ORDER' && run.selectedCandidateIndex >= 0
-        && run.selectedCandidateIndex < run.candidateSet.length && (
-        <article className="snapshot">
-          <h2>正在锁定库存并生成确认快照</h2>
-          <p>如果上一次调用因网络或 Commerce 协议错误中断，可以安全重试；后端会复用同一个
-            effectId，不会重复预占库存。</p>
-          <button disabled={busy} onClick={() => act(() => selectCandidate(
-            run.runId, run.candidateSet[run.selectedCandidateIndex].skuId))}>
-            {busy ? '正在处理…' : '重试锁定库存'}
-          </button>
-        </article>
-      )}
-
-      {run.phase === 'NEEDS_CONSTRAINT_RELAXATION' && (
-        <RelaxForm runId={run.runId} busy={busy} act={act} />
-      )}
-
-      {run.phase === 'WAITING_APPROVAL' && run.confirmableSnapshot && (
-        <article className="snapshot">
-          <h2>{run.candidateSet[run.selectedCandidateIndex]?.name ?? run.confirmableSnapshot.quote.skuId}</h2>
-          <p>SKU：{run.confirmableSnapshot.quote.skuId} · 数量：{run.confirmableSnapshot.quote.quantity}</p>
-          <p>商品金额：¥{run.confirmableSnapshot.quote.itemAmount.amount}</p>
-          {run.confirmableSnapshot.quote.discounts.map((discount) =>
-            <p key={discount.code}>{discount.description}：-¥{discount.amount.amount}</p>)}
-          <p>运费：¥{run.confirmableSnapshot.quote.shippingFee.amount}</p>
-          <div><span>最终应付</span><strong>¥{run.confirmableSnapshot.quote.payableAmount.amount}</strong></div>
-          <p>预计 {run.confirmableSnapshot.quote.deliveryPromise} 送达</p>
-          {run.confirmableSnapshot.quote.observedAt &&
-            <p>价格查询于 {new Date(run.confirmableSnapshot.quote.observedAt).toLocaleString()}</p>}
-          <p>库存已临时锁定至 {new Date(run.confirmableSnapshot.expiresAt).toLocaleTimeString()}</p>
-          <div className="actions">
-            <button className="secondary" disabled={busy} onClick={() => act(() => decide(run, 'REJECT'))}>取消</button>
-            <button disabled={busy} onClick={() => act(() => decide(run, 'APPROVE'))}>确认创建订单</button>
-          </div>
-        </article>
-      )}
-
-      {run.phase === 'COMPLETED' && run.finalOrder && (
-        <article className="success">
-          <h2>订单已创建</h2>
-          <p>{run.finalOrder.orderId}</p>
-          <strong>{run.finalOrder.status}</strong>
-        </article>
-      )}
-
-      {run.phase === 'CANCELLED' && <article className="success"><h2>任务已取消</h2>
-        <p>已释放本任务占用的库存，不会创建订单。</p></article>}
-    </section>
+      <footer className="foot">
+        <span>{IMAGE_SOURCE_NOTE}</span>
+        <span>金额、优惠、库存预占与订单创建只由交易系统决定，Agent 和页面都不参与计算。</span>
+      </footer>
+    </div>
   )
 }

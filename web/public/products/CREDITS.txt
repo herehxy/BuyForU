@@ -1,0 +1,63 @@
+商品图片来源（Wikimedia Commons，含 Unsplash 授权作品）
+========================================================
+
+laptop-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Laptop_on_wood_(Unsplash).jpg
+laptop-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Laptop_in_close-up_(Unsplash).jpg
+laptop-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Typing_on_a_laptop_(Unsplash).jpg
+laptop-4.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Statistics_on_a_laptop_(Unsplash).jpg
+laptop-5.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Ruler_and_laptop_on_a_desk_(Unsplash).jpg
+laptop-6.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Laptop_computer_monitor_(Unsplash).jpg
+laptop-7.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Desk_Setup_(Unsplash).jpg
+laptop-8.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Notebook_computer.jpg
+laptop-9.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Overhead_desktop_workspace_(Unsplash).jpg
+laptop-10.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Schenker_VIA14_Laptop_asv2021-01.jpg
+phone-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Black_smartphone_in_hand_(Unsplash).jpg
+phone-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Smartphone_and_coffee_(Unsplash).jpg
+phone-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Colored_pen_and_smartphone_on_a_table_(Unsplash_36nRvt6EP2I).jpg
+phone-4.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Design_smartphone_definition_(Unsplash).jpg
+headphone-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Grado_Headphones_SR80e_(Unsplash).jpg
+headphone-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Meizu_headphones_keyboard_(Unsplash).jpg
+headphone-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Headphones_on_a_loudspeaker_(Unsplash).jpg
+headphone-4.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Music_Headphones_(Unsplash).jpg
+monitor-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Designer's_two-screen_setup_(Unsplash).jpg
+monitor-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Monitor_of_mac.jpg
+monitor-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Desktop_purple_neon_light_(Unsplash).jpg
+tablet-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Hybrid_tablet_(Unsplash).jpg
+tablet-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Tablet_on_a_newspaper_(Unsplash).jpg
+tablet-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Stylus_on_a_graphics_tablet_(Unsplash).jpg
+keyboard-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Keyboard_(Unsplash).jpg
+keyboard-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Minimal_laptop_keyboard_(Unsplash).jpg
+keyboard-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Lauberger_&_Gloss_keyboard_in_black_and_white_(Unsplash).jpg
+mouse-1.jpg
+    来源: https://commons.wikimedia.org/wiki/File:Apple_mouse_and_keyboard_(Unsplash).jpg
+mouse-2.jpg
+    来源: https://commons.wikimedia.org/wiki/File:A_wireless_computer_mouse.jpg
+mouse-3.jpg
+    来源: https://commons.wikimedia.org/wiki/File:2023_Mysz_komputerowa_Logitech_G903_Lightspeed.jpg
