@@ -71,12 +71,16 @@ public class GraphShoppingWorkflow {
 
     public ShoppingAgentState selectCandidate(String runId, String userId, String skuId) {
         ShoppingAgentState current = actions.get(runId, userId);
+        if (current.phase() == ShoppingAgentState.Phase.CREATING_ORDER) {
+            // 下单只能从 approve 恢复。重复选择同一 SKU 不能把 createOrder 跑完。
+            throw new RunStateConflictException("order creation is being resolved and cannot be selected again");
+        }
         if ((current.phase() == ShoppingAgentState.Phase.WAITING_APPROVAL
-                || current.phase() == ShoppingAgentState.Phase.CREATING_ORDER
                 || current.phase() == ShoppingAgentState.Phase.COMPLETED)
                 && current.selectedCandidateIndex() >= 0
                 && current.candidateSet().get(current.selectedCandidateIndex()).skuId().equals(skuId)) {
-            return current;
+            executionLock.execute(runId, () -> recoverIfNecessary(actions.get(runId, userId), null));
+            return actions.get(runId, userId);
         }
         if (current.phase() == ShoppingAgentState.Phase.PREPARING_CONFIRMABLE_ORDER
                 && current.selectedCandidateIndex() >= 0
@@ -95,6 +99,24 @@ public class GraphShoppingWorkflow {
                     && current.confirmableSnapshot().snapshotId().equals(snapshotId)
                     && current.confirmableSnapshot().summaryHash().equals(summaryHash)) return current;
             throw new RunStateConflictException("completed run belongs to a different approval snapshot");
+        }
+        executionLock.execute(runId, () -> recoverIfNecessary(actions.get(runId, userId), null));
+        ShoppingAgentState recovered = actions.get(runId, userId);
+        if (recovered.phase() == ShoppingAgentState.Phase.COMPLETED) {
+            if (recovered.confirmableSnapshot() != null
+                    && recovered.confirmableSnapshot().snapshotId().equals(snapshotId)
+                    && recovered.confirmableSnapshot().summaryHash().equals(summaryHash)) return recovered;
+            throw new RunStateConflictException("completed run belongs to a different approval snapshot");
+        }
+        if (recovered.phase() != ShoppingAgentState.Phase.WAITING_APPROVAL
+                && recovered.phase() != ShoppingAgentState.Phase.CREATING_ORDER) {
+            // 过期重报价恢复后可能停在新的 WAITING 之外的阶段；不能再用旧 snapshot 去批准。
+            return recovered;
+        }
+        if (recovered.phase() == ShoppingAgentState.Phase.WAITING_APPROVAL
+                && recovered.confirmableSnapshot() != null
+                && !recovered.confirmableSnapshot().snapshotId().equals(snapshotId)) {
+            return recovered;
         }
         resume(runId, "awaitApproval", Map.of("approvalRoute", "approved", "snapshotId", snapshotId,
                 "summaryHash", summaryHash));
@@ -115,15 +137,17 @@ public class GraphShoppingWorkflow {
             case NEEDS_CONSTRAINT_RELAXATION -> resume(runId, "constraintRelaxation",
                     Map.of("relaxationRoute", "cancel"));
             case COMPLETED -> throw new RunStateConflictException("completed order cannot be cancelled by the agent");
-            default -> throw new RunStateConflictException("run cannot be cancelled while a transition is executing");
+            default -> executionLock.execute(runId, () -> actions.cancel(runId, userId));
         }
         return actions.get(runId, userId);
     }
 
-    public ShoppingAgentState relax(String runId, String userId, String explicitInstruction) {
+    public ShoppingAgentState relax(String runId, String userId, String explicitInstruction,
+                                    java.util.List<String> fields) {
         assertOwner(runId, userId);
         resume(runId, "constraintRelaxation",
-                Map.of("relaxationRoute", "approved", "relaxationMessage", explicitInstruction));
+                Map.of("relaxationRoute", "approved", "relaxationMessage", explicitInstruction,
+                        "relaxationFields", fields == null ? "" : String.join(",", fields)));
         return actions.get(runId, userId);
     }
 
@@ -156,6 +180,14 @@ public class GraphShoppingWorkflow {
                 invoke(state.runId(), GraphInput.args(originalInput));
                 return;
             }
+            if (state.phase() == ShoppingAgentState.Phase.PREPARING_CONFIRMABLE_ORDER) {
+                recoverPreparing(state, lastNode, config);
+                return;
+            }
+            if (state.phase() == ShoppingAgentState.Phase.CREATING_ORDER) {
+                recoverCreating(state, lastNode, config);
+                return;
+            }
             String stableNode = switch (state.phase()) {
                 case NEEDS_CLARIFICATION -> "needClarification";
                 case PRESENTING_CANDIDATES -> "presentCandidates";
@@ -166,6 +198,8 @@ public class GraphShoppingWorkflow {
                 default -> null;
             };
             if (stableNode != null && stableNode.equals(lastNode)) return;
+            // 人工等待节点的默认边是 cancel/rejected。没有用户路由时不能裸 resume。
+            if (isInterruptNode(lastNode)) return;
             graph.compiledGraph().invoke(GraphInput.resume(), config)
                     .orElseThrow(() -> new IllegalStateException("shopping graph returned no state"));
         } catch (RuntimeException runtime) {
@@ -173,6 +207,40 @@ public class GraphShoppingWorkflow {
         } catch (Exception checked) {
             throw new IllegalStateException("could not recover shopping graph", checked);
         }
+    }
+
+    private void recoverPreparing(ShoppingAgentState state, String lastNode, RunnableConfig config)
+            throws Exception {
+        if ("awaitApproval".equals(lastNode)) {
+            // 过期批准把业务态翻成 PREPARING 后崩溃。必须走 requote，不能落到默认 rejected。
+            RunnableConfig updated = graph.compiledGraph().updateState(config,
+                    Map.of("approvalRoute", "requote"), lastNode);
+            graph.compiledGraph().invoke(GraphInput.resume(), updated)
+                    .orElseThrow(() -> new IllegalStateException("shopping graph returned no state"));
+            return;
+        }
+        if ("recordSelection".equals(lastNode) || "prepareConfirmableOrder".equals(lastNode)) {
+            graph.compiledGraph().invoke(GraphInput.resume(), config)
+                    .orElseThrow(() -> new IllegalStateException("shopping graph returned no state"));
+            return;
+        }
+        actions.prepareSelectedCandidate(state.runId(), state.userId());
+    }
+
+    private void recoverCreating(ShoppingAgentState state, String lastNode, RunnableConfig config)
+            throws Exception {
+        if (!"awaitApproval".equals(lastNode) || state.confirmableSnapshot() == null) return;
+        RunnableConfig updated = graph.compiledGraph().updateState(config, Map.of(
+                "approvalRoute", "approved",
+                "snapshotId", state.confirmableSnapshot().snapshotId(),
+                "summaryHash", state.confirmableSnapshot().summaryHash()), lastNode);
+        graph.compiledGraph().invoke(GraphInput.resume(), updated)
+                .orElseThrow(() -> new IllegalStateException("shopping graph returned no state"));
+    }
+
+    private static boolean isInterruptNode(String lastNode) {
+        return "awaitApproval".equals(lastNode) || "needClarification".equals(lastNode)
+                || "presentCandidates".equals(lastNode) || "constraintRelaxation".equals(lastNode);
     }
 
     private void resume(String runId, String expectedNode, Map<String, Object> userInput) {

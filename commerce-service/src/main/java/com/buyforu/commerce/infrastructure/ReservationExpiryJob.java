@@ -13,7 +13,7 @@ public class ReservationExpiryJob {
         this.commerce = commerce;
     }
 
-    @Scheduled(fixedDelayString = "${buyforu.reservations.expiry-poll-delay:PT5S}")
+    @Scheduled(fixedDelayString = "${buyforu.reservations.expiry-poll-delay:PT5S}", scheduler = "leaseScheduler")
     public void releaseExpiredInventory() {
         commerce.expireReservationsNow();
     }

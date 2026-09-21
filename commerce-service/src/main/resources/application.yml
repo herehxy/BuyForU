@@ -33,10 +33,15 @@ buyforu:
   mcp:
     # Agent 和 Commerce 必须使用同一个长随机服务令牌。
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
+  metrics:
+    # 单独的 Prometheus 凭证。留空则 /actuator/prometheus 仍使用 MCP 服务令牌。
+    token: ${COMMERCE_METRICS_TOKEN:}
   events:
     # production profile 必须配置真实 Webhook 和 HMAC 签名密钥。
     webhook-url: ${EVENT_WEBHOOK_URL:}
     signing-secret: ${EVENT_SIGNING_SECRET:}
+    # 留空则启动时生成随机 UUID，保证多实例 claimed_by 不会撞车。
+    instance-id: ${EVENT_INSTANCE_ID:}
 management:
   # 只暴露健康、构建信息和 Prometheus 指标。
   endpoint:

@@ -34,7 +34,7 @@ class PlanSpecValidatorTest {
     }
 
     private PlanSpec.ShoppingConstraints constraints() {
-        return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), List.of(),
+        return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), null, List.of(),
                 List.of("Excluded"), Map.of("memory", "16GB"), 1, "addr-1",
                 LocalDate.now().plusDays(1), 1);
     }

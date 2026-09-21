@@ -14,6 +14,10 @@ spring:
         options:
           model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
           temperature: 0
+          # V4 默认 thinking=high。规划只要 PlanSpec JSON，必须关掉，否则会超过 45 秒硬超时。
+          extra-body:
+            thinking:
+              type: disabled
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
       embedding:
@@ -38,6 +42,8 @@ spring:
     username: ${DB_USER:buyforu}
     password: ${DB_PASSWORD:buyforu}
     hikari:
+      # pgvector 装在 agent_schema，连接必须能解析 vector 类型。
+      connection-init-sql: SET search_path TO agent_schema, public
       # 网络等待不持有数据库连接，因此连接池按短事务吞吐配置而非 LLM 并发配置。
       maximum-pool-size: ${AGENT_DB_MAX_POOL_SIZE:12}
       minimum-idle: ${AGENT_DB_MIN_IDLE:2}
@@ -62,6 +68,8 @@ spring:
 buyforu:
   security:
     audience: ${OIDC_AUDIENCE:buyforu-api}
+    # 逗号分隔的精确代理地址；未列入的来源即使携带 X-Forwarded-For 也不会被信任。
+    trusted-proxies: ${TRUSTED_PROXY_ADDRESSES:}
   mcp:
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
   concurrency:
@@ -86,6 +94,14 @@ buyforu:
     read-user-burst: ${READ_USER_BURST:30}
     global-write-rate-per-second: ${GLOBAL_WRITE_RATE_PER_SECOND:100}
     global-write-burst: ${GLOBAL_WRITE_BURST:200}
+  retention:
+    # 审计记录是「线上 Badcase 回流评测集」的唯一过程证据，窗口要长于一个迭代周期。
+    # 原先 run_event 硬编码 7 天、tool_call 无保留策略，两者矛盾且都不可运维。
+    run-event: ${AUDIT_RUN_EVENT_RETENTION:P90D}
+    tool-call: ${AUDIT_TOOL_CALL_RETENTION:P90D}
+    batch-size: ${AUDIT_RETENTION_BATCH_SIZE:1000}
+    max-batches-per-cycle: ${AUDIT_RETENTION_MAX_BATCHES:20}
+    poll-delay: ${AUDIT_RETENTION_POLL_DELAY:PT1H}
 server:
   port: ${PORT:8080}
 management:

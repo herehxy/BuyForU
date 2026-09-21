@@ -47,6 +47,17 @@ public class ToolCallAudit {
                 Timestamp.from(Instant.now()), id);
     }
 
+    /**
+     * 清理历史审计记录。原先这张表没有任何保留策略，会永久增长；
+     * 现在由 {@code AuditRetentionJob} 按 {@code buyforu.retention.tool-call} 的窗口调用。
+     */
+    public int deleteOlderThan(Instant cutoff, int limit) {
+        return jdbc.update("""
+                DELETE FROM agent_schema.tool_call WHERE tool_call_id IN
+                    (SELECT tool_call_id FROM agent_schema.tool_call WHERE started_at<? ORDER BY started_at LIMIT ?)
+                """, Timestamp.from(cutoff), limit);
+    }
+
     private static String digest(String value) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")

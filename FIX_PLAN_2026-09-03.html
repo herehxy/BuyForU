@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="Uf6nRMAS6eYCA2ylCEgx4p">
+<head data-page-node-id="h2BCCtX6lrhE8Z0gmFiRHY">
+<meta charset="UTF-8" data-page-node-id="R7EViLzzyGZRxT9BLBVicD">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="diB9FFq9Q1lxFPUtWTDQWu">
+<title>BuyForU 修复方案：heartbeat 陈旧判定与命令期限对齐</title>
+<style>
+  :root { --bg:#f7f8fa; --surface:#fff; --border:#e4e7ec; --text:#1f2329; --muted:#646a73;
+          --accent:#2563eb; --ok:#16a34a; --warn:#d97706; --high:#dc2626; --code:#f3f4f6; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; line-height:1.75; padding:32px 16px; }
+  .container { max-width:1000px; margin:0 auto; }
+  header { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px 32px; margin-bottom:24px; }
+  h1 { font-size:23px; margin-bottom:8px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; vertical-align:middle; }
+  .badge.ok { background:#ecfdf5; color:var(--ok); } .badge.warn { background:#fffbeb; color:var(--warn); }
+  section { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 28px; margin-bottom:20px; }
+  h2 { font-size:18px; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid var(--border); }
+  h3 { font-size:15px; margin:18px 0 8px; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { background:#fafbfc; font-weight:600; white-space:nowrap; }
+  code { background:var(--code); border-radius:4px; padding:1px 6px; font-size:13px; font-family:"SF Mono",Menlo,monospace; }
+  pre { background:var(--code); border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:12.5px; font-family:"SF Mono",Menlo,monospace; line-height:1.6; margin:10px 0; }
+  ul,ol { padding-left:22px; margin:8px 0; } li { margin:5px 0; }
+  .note { background:#eff6ff; border-left:4px solid var(--accent); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  .callout { background:#fffbeb; border-left:4px solid var(--warn); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  .danger { background:#fef2f2; border-left:4px solid var(--high); padding:10px 14px; border-radius:0 8px 8px 0; font-size:14px; margin:12px 0; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:4px; font-size:12px; font-weight:700; background:#e0e7ff; color:var(--accent); }
+  footer { color:var(--muted); font-size:12px; text-align:center; margin-top:24px; }
+</style>
+</head>
+<body data-page-node-id="eFxYzxNom4mQ9MNjATTpMF">
+<div class="container" data-page-node-id="isAi49bzEHxiKPQr9Chn6S">
+
+<header data-page-node-id="gjhQeX4WgOy81huGNu1ThC">
+  <h1 data-page-node-id="gv4X6Vm4J9Yv3ADwvG3HZR">修复方案：heartbeat 陈旧判定与命令期限对齐 <span class="badge warn" data-page-node-id="OiEzig2kjb13swhiwiNn60">待评审</span></h1>
+  <div class="meta" data-page-node-id="OtutvVAufV8o6HcatfT2y6">目标缺陷：P2（90 秒硬阈值误杀长任务）｜ 基线 HEAD：<code data-page-node-id="kylcEtgBBd5GRYvg00FyLw">0d96ffc</code> ｜ 方案日期：2026-09-03 ｜ 底稿：<code data-page-node-id="WhjFG5xaRmQxzpKxGERCta">docs/FIX_PLAN_heartbeat_deadline.md</code></div>
+</header>
+
+<section data-page-node-id="ZmY2PhhmomGpvgEvDvEcsC">
+  <h2 data-page-node-id="EmbnmjtMBuh8tINWfvkEls">1. 失败场景（先定义，再改代码）</h2>
+
+  <h3 data-page-node-id="2H5GltwCv6TN9ZJLNbSHwf">场景 A（主缺陷）：合法长任务被确定性误杀</h3>
+  <ol data-page-node-id="5LurcAoraUslvvFhDK5RIq">
+    <li data-page-node-id="MpteAkJvCVHuS74DYrapIl">用户提交 PLANNING 命令，<code data-page-node-id="p5bwvmzZ6bE6rHOdi6HBD9">deadlineAt = now + 210s</code>。</li>
+    <li data-page-node-id="aKK1AyNcHAw2qBue4OfASz">DeepSeek 响应慢或触发三级 Replan，命令持续运行。</li>
+    <li data-page-node-id="SyBxGakFQn550I5HV2Dbp9"><code data-page-node-id="qJ8rlURZ2hVeHmYPYNk3Dx">t = 90s</code>：<code data-page-node-id="H5o8Q73OhFRMED9aYqAtRm">heartbeat()</code> 计算 <code data-page-node-id="naNgfqMJg3KIdxyDYubyqK">staleBefore = now - 90s</code>，因 <code data-page-node-id="3OWzFlE6TLi96iNduEHBAJ">startedAt &lt; staleBefore</code> 判定"卡住"。</li>
+    <li data-page-node-id="OxAS1Vbvhzdn8T29QnunuE">停止续租并 <code data-page-node-id="7XQ13hkroMLuHTBrNUTzXL">worker.interrupt()</code>。</li>
+    <li data-page-node-id="lsf5wB3C1SUdg6uDrPhPXu">worker 阻塞在 <code data-page-node-id="nbdR7M1Fw9AT4OAVN2E6FF">DependencyExecutor.future.get()</code>，抛 <code data-page-node-id="0mdzbapSVHgiu0IK7XGvB9">InterruptedException</code> → 包装为 <code data-page-node-id="tvpNHZR4ErKNjevv3ny7mt">DependencyInterruptedException</code>。</li>
+    <li data-page-node-id="zlUfMEbyJDBRdxaFnGg3vv">该类型<strong data-page-node-id="eMhbttfSp3hBbab2ZGlEAr">不在</strong> <code data-page-node-id="a696h1G7ZyAjV5TFVF6HNu">execute()</code> 的可重试分支内，落入 <code data-page-node-id="kdAfiefrlgJxqvkujmdANj">catch (RuntimeException)</code>。</li>
+    <li data-page-node-id="CwlMt2c69OELQfbA9FfXYc">命令被 <code data-page-node-id="xXykKm3u8OiiGx8yrYO2DM">markFailed('COMMAND_EXECUTION_FAILED')</code>，<strong data-page-node-id="EamF9RAO9kgNzlxm5EchN0"><code data-page-node-id="cxAFlRtpa2ul9r8Y6zv4CU">attempts</code> 不递增、不重试</strong>。</li>
+  </ol>
+  <div class="danger" data-page-node-id="jZGFdJAmDvWDkfEQi8cQVP"><strong data-page-node-id="LyBuDrnX2ZP1c1QQeWlkVZ">性质：确定性失败。</strong>任务需求超过 90 秒时，重试多少次都在同一位置被杀——不是偶发故障，是该场景下功能不可用。</div>
+
+  <h3 data-page-node-id="q9F6f2AFjSiyIuCeGb6JnB">场景 B（衍生）：误杀与用户主动取消不可区分</h3>
+  <p data-page-node-id="3JvnxaUFIUiCkZgEOoEdNL">用户主动取消同样走 <code data-page-node-id="GpFjyhUWgLw6GlY5FjAF32">interrupt → DependencyInterruptedException → COMMAND_EXECUTION_FAILED</code> 路径，两者产生完全相同的 <code data-page-node-id="iDeBQheKJYiEKuHlNXAYKP">error_code</code>，运维无法识别场景 A。</p>
+
+  <h3 data-page-node-id="Tc6JqcTeXqGHojKNGGUHi8">场景 C（衍生）：违反项目自身规范</h3>
+  <p data-page-node-id="YlZWTr3XVPU702He2gukhs"><code data-page-node-id="i4v0y5xxrEEOWdaiHAjZRv">ConcurrencyProperties</code> 类注释承诺"代码中不散落不可运维的魔法数字"，<code data-page-node-id="ozZdZN5APUDQ4R8nWuDPtd">minusSeconds(90)</code> 正违反该承诺。</p>
+</section>
+
+<section data-page-node-id="pL5qEHW9HdepDOvsaqiTga">
+  <h2 data-page-node-id="kPAfkoynTE6iAOYeFMqvwQ">2. 必须成立的不变量</h2>
+  <table data-page-node-id="WEGKYAI13CaoxZDG3RXGJ5">
+    <tr data-page-node-id="v0hoZGeXQLYaPzYVFaNnwt"><th data-page-node-id="GCF3cAx7F9IMOtBc3EQadw">#</th><th data-page-node-id="OkJgEbJcUxMtArSz8oJoKK">不变量</th></tr>
+    <tr data-page-node-id="o3ACXboQELvrzkDfhoNFec"><td data-page-node-id="39eyqJ9QjcAki4GHEz8xLi">I1</td><td data-page-node-id="glQAox0Cx19Olnw6C0696N">只要命令未超过 <code data-page-node-id="eYF4tbGtmVBrAavxh9afM6">deadlineAt</code>，无论已运行多久，都必须持续获得续租</td></tr>
+    <tr data-page-node-id="wwC8vNGrwpIHxutaZNmI01"><td data-page-node-id="YzrqZdfOqVFFB2uYhFmRFA">I2</td><td data-page-node-id="ZBMr8bzIntb4tJcS6cNqRu">停止续租的唯一理由是：<code data-page-node-id="Hikmb3BDQIRoHtewS2sYeg">cancel_requested = true</code> <strong data-page-node-id="f3Aq2Q6D20P9fBFGf5IhfC">或</strong> <code data-page-node-id="2pFkucEPYeaDmxRgZyRqQE">deadlineAt &lt;= now</code></td></tr>
+    <tr data-page-node-id="apDMdJ5RvmUgnjlt1SQkPo"><td data-page-node-id="dC3RyZAU4HZdvl4Uv1p5S6">I3</td><td data-page-node-id="7Fe2k7QJQgP46CgqZZatAj">全系统租约陈活性判定统一以 <code data-page-node-id="zKeoxr78ThQ1BRPlbVBNcW">lease_until</code> / <code data-page-node-id="pg3A0cXDJ2CuuKpyzkm6So">deadlineAt</code> 为准，不存在第二套时间判据</td></tr>
+    <tr data-page-node-id="B7oxkUTO87ERVzbxUSAzxZ"><td data-page-node-id="IzFdPWyf7JZaGxCEV2RtqQ">I4</td><td data-page-node-id="wsvI8PI1ttgsWISOU7xgJO">所有期限与容量参数必须可从 <code data-page-node-id="ie9rcbsVVn3Ezg6goBmUjv">ConcurrencyProperties</code> 配置，代码中无裸魔法数字</td></tr>
+    <tr data-page-node-id="d62pn7FOH8XZ85UvpbZebo"><td data-page-node-id="uXKOyZXCfY8JPGyQ2DMKqx">I5</td><td data-page-node-id="Nd8W9wj7HdCv4AGeHFraWP">被中断的命令必须可归类为 <code data-page-node-id="0IgkUcDWytUDLGnGpD4jzX">CANCELLED</code> / <code data-page-node-id="Uvulj3KwzNjZGtcrjOKj3u">EXPIRED</code> / <code data-page-node-id="MXUIsP3WTufBn3nUOYxEmT">FAILED</code> 之一，且在指标上可区分</td></tr>
+  </table>
+</section>
+
+<section data-page-node-id="q2pfBuGGxmHooM7IBTMLUy">
+  <h2 data-page-node-id="yFSUSDbyM2gcHosZyyWgsO">3. 方案对比与选型</h2>
+  <table data-page-node-id="59D0uz5yAVxQc6C4aGFWaB">
+    <tr data-page-node-id="aCUUg4iUZwPx7SgQ2mHIdp"><th data-page-node-id="P4cxiLLVlKFU8Q2jCvBqwK">方案</th><th data-page-node-id="8AYbmueyEf7KYtgzq4wKlS">判据</th><th data-page-node-id="oQh0QQdrbrGDC2h3kCKNiF">改动面</th><th data-page-node-id="FBKyYWySHj1ESYdGHcS1rw">优点</th><th data-page-node-id="uxPA0FRLyGEh8enNCNPcFO">缺点</th></tr>
+    <tr data-page-node-id="58Fxv8Mth5OnMcnEFAVvJJ">
+      <td data-page-node-id="rXQaNsvqZ9mkBKzDRGACCf"><strong data-page-node-id="3XVPZG9l3BXAsBlDCxUATy">A. 用 <code data-page-node-id="oO8MHCGwJSwkSWazUpbDLx">deadlineAt</code> 判定</strong><br data-page-node-id="RexmECsY1KWNm9q2L8MtDC"><span class="tag" data-page-node-id="EEljJDVRiLir0ggftmPsyt">推荐</span></td>
+      <td data-page-node-id="ABEVXaT5oOZDwVGg6RyQHd">命令期限是否届满</td>
+      <td data-page-node-id="zPm8JcVFJW8qny9Vjz0OiU"><code data-page-node-id="zkOO0ulIO75uJlMeilNUDR">CommandWorker</code> 三个方法</td>
+      <td data-page-node-id="NjRefbmSnkPx6vhOK41YGp">零新增配置、<strong data-page-node-id="yB9d1a9rzzC8xbG3YjnUxG">零数据库迁移</strong>；直接复用 <code data-page-node-id="Ky95vhmrk9WiGtwlSZWJQj">CommandService</code> 已定义的 210/50/15 秒；消除魔法数字</td>
+      <td data-page-node-id="GDFyqNWssGD5lu04iWpOge">假死线程会占用租约至期限届满（PLANNING 最长 210 秒）</td>
+    </tr>
+    <tr data-page-node-id="diAXOIYP9WeSBD8DVpJxnU">
+      <td data-page-node-id="IOxs4qQOELbwH79sgURyoX">B. 新增 <code data-page-node-id="FSmf5RE8F3JVXlf53LEDFa">last_heartbeat_at</code> 列 + 阈值</td>
+      <td data-page-node-id="t63ZG3VAtBe3HXVFzKDaPq">最后心跳时间</td>
+      <td data-page-node-id="0Ib15gntwKlRC5bbbYSiAW">Flyway 迁移 + 表结构 + 判据</td>
+      <td data-page-node-id="sn1xS2iN5pj55l0DILfjhX">可配置"无进展"阈值</td>
+      <td data-page-node-id="pVeIVVflVOQbpbGEjDheIP"><strong data-page-node-id="QYEsKMG3kbf2N4dsqGbdG0">循环论证</strong>：heartbeat 自身不续租则该列不更新，无法区分"主动停止"与"线程假死"；需迁移，风险高</td>
+    </tr>
+    <tr data-page-node-id="SSTJNuvmCrQNgJj4hnHkb4">
+      <td data-page-node-id="3ZqDu67J4OCDVn93VQda6C">C. A + 业务进展信号</td>
+      <td data-page-node-id="1xWudm0xEAVok8WrCofyNZ">期限届满 OR 无进展超阈值</td>
+      <td data-page-node-id="AaA6GjK1evBkIodRs4XitF">A + <code data-page-node-id="QiQLPXCHB0LdOWCklab5uM">ExecutionContext</code> 埋点 + 图节点改造</td>
+      <td data-page-node-id="wfiFBhl7sWDobtx2FX0SLU">能提前识别假死</td>
+      <td data-page-node-id="WHyzfSZH5rXk656HVbl9Bz">改动面显著扩大，需在图节点推进处埋点</td>
+    </tr>
+  </table>
+  <div class="note" data-page-node-id="smcvKKbnchE00UcY5ZK5Dz"><strong data-page-node-id="Y2bEUgfOznWMEUr6b7MzIL">选型结论：方案 A 为必做项，方案 C 列为后续可选增强。</strong>A 以最小改动消除确定性不可用、语义不一致与规范违背三项问题；C 解决的"假死占满 210 秒"属次要问题，且 210 秒为有界上界、不会无限占用，可分期实施。B 存在循环论证缺陷，不采纳。</div>
+</section>
+
+<section data-page-node-id="BY0fN6y3GzxgW4WLZGgd90">
+  <h2 data-page-node-id="AWAHL6xOhlS4PBEDBXHyBB">4. 详细设计（方案 A）</h2>
+
+  <h3 data-page-node-id="mO5maZjaZ3reig52d8JIhp">4.1 变更一：<code data-page-node-id="j3mdQKCfTpS2vhPIyS0hk2">heartbeat()</code> 判据替换</h3>
+  <p data-page-node-id="oSshNMJB4d45F3AC0QMP5O"><strong data-page-node-id="ReqK1lnEVVOxV1Ho1en6rO">现状</strong>（<code data-page-node-id="D1SibDs9yUOqxyJOiJ87pO">CommandWorker.java:89-106</code>）：</p>
+  <pre data-page-node-id="t49UR2NwuWDCFBhcQ3plvh">Instant staleBefore = Instant.now().minusSeconds(90);          // 硬编码魔法数字
+...
+Instant startedAt = commands.find(commandId).map(AgentCommand::startedAt).orElse(null);
+if (cancelRequested || !shouldRenewLease(startedAt, staleBefore)) {   // 用首次开始时间</pre>
+  <p data-page-node-id="WWQZjEqIABXks3i4gWNXRx"><strong data-page-node-id="NCqHbbA3a95MHDhuCh2D7H">改为</strong>：</p>
+  <pre data-page-node-id="vk6erZpiOauTdTWLClef17">Instant now = Instant.now();
+activeLeases.forEach((commandId, lease) -> {
+    boolean cancelRequested = leases.cancellationRequested(lease);
+    Instant deadlineAt = commands.find(commandId).map(AgentCommand::deadlineAt).orElse(null);
+    // 只有期限届满或用户请求取消才停止续租；已运行时长本身不构成终止理由（I1、I2）。
+    if (cancelRequested || !shouldRenewLease(deadlineAt, now)) {
+        inFlight.cancel(commandId);
+        Thread worker = activeThreads.get(commandId);
+        if (worker != null) worker.interrupt();
+        return;
+    }
+    if (!leases.heartbeat(lease, now.plus(properties.leaseDuration()))) {
+        activeLeases.remove(commandId);
+    }
+});</pre>
+
+  <h3 data-page-node-id="Wr2Qyqe8OUYlZVOyFcG0tU">4.2 变更二：<code data-page-node-id="oGIfmxqgBo7z8okh8rv5a9">shouldRenewLease</code> 语义重定义</h3>
+  <pre data-page-node-id="Zyq4N1HQJL4vGMzL0jMxfz">// 现状
+static boolean shouldRenewLease(Instant startedAt, Instant staleBefore) {
+    return startedAt == null || !startedAt.isBefore(staleBefore);
+}
+
+// 改为
+/** 续租的唯一判据是命令是否仍在期限内；已运行时长不影响续租（I1）。 */
+static boolean shouldRenewLease(Instant deadlineAt, Instant now) {
+    return deadlineAt == null || deadlineAt.isAfter(now);
+}</pre>
+
+  <h3 data-page-node-id="sbqcRBans6EPRNyPmaNe0i">4.3 变更三：中断结果分类（修复场景 B）</h3>
+  <p data-page-node-id="WaW2vBBuj3VlsoSbLH1HnJ">在 <code data-page-node-id="UzhlvIotkd7swFws6lfBYb">execute()</code> 中 <strong data-page-node-id="G9s1gMwOg9BFkzXYcDsoH4">在 <code data-page-node-id="cFYZUR6fwfhAAgvweS20wg">catch (RuntimeException)</code> 之前</strong>新增分支（<code data-page-node-id="kHUCWlu6uKcfWQTxLvUdvG">DependencyInterruptedException</code> 是 <code data-page-node-id="5UBBD1y82CWFgN3LAwip0L">RuntimeException</code> 子类，catch 顺序必须在前）：</p>
+  <pre data-page-node-id="b9OzqDVtpfPtzVoH40vhlp">} catch (DependencyExecutor.DependencyInterruptedException interrupted) {
+    // 被 heartbeat 中断：区分"用户主动取消"与"期限届满终止"（I5）。
+    if (leases.cancellationRequested(lease)) {
+        commands.markCancelled(command.commandId(), "RUN_CANCEL_REQUESTED");
+        events.append(command.runId(), command.commandId(), "command.cancelled",
+                Map.of("code", "RUN_CANCEL_REQUESTED"));
+    } else {
+        commands.markFailed(command.commandId(), "COMMAND_DEADLINE_EXCEEDED", safeMessage(interrupted));
+        meters.counter("buyforu_command_deadline_terminated_total",
+                "queue_class", command.queueClass().name()).increment();
+        events.append(command.runId(), command.commandId(), "command.failed",
+                Map.of("code", "COMMAND_DEADLINE_EXCEEDED"));
+    }
+} catch (RuntimeException failure) {
+    // 既有的通用失败分支保持不变
+}</pre>
+  <div class="callout" data-page-node-id="WnxHzyAy8F2TEROnCu4HsU"><strong data-page-node-id="Aoyv0LdbQgzTlgA69ZwBwK">关键约束：</strong>不可用 <code data-page-node-id="0Y2WvDs8jGgs9mvm4MLe8y">markExpired()</code> 代替——其 SQL 限定 <code data-page-node-id="iaNuKbR07GvKA4FRkdiyza">status IN ('QUEUED','RETRY_WAIT')</code>，对 <code data-page-node-id="wBHAlLrE3M0eFDAIcK698j">RUNNING</code> 命令无效，会静默漏更新。</div>
+
+  <h3 data-page-node-id="0fZEbPiWx2atKTl6TY3tSv">4.4 变更四：<code data-page-node-id="0tMIgMPEl8uJ2RjKANOfdx">safeMessage</code> 补充文案</h3>
+  <pre data-page-node-id="xMXf8gHsOuc57B6zd6HhAa">case "COMMAND_DEADLINE_EXCEEDED" -> "任务处理超时，请稍后重试";</pre>
+
+  <h3 data-page-node-id="r8ACwMlF3ljVuSUIIXHxoB">4.5 变更五（可选，本次不做）</h3>
+  <p data-page-node-id="EhRjoK5jviFh7kf3kXXZTs">将 <code data-page-node-id="FrEyLEF0RGiRIdIsmBzdPZ">deadlineAt</code> 在 <code data-page-node-id="ZpgOMQNZv4IV5eJoFqbWJO">claim</code> 时写入 <code data-page-node-id="jNl0ekSS97vQPSZECsFJzO">Lease</code> record，省去每轮心跳的 <code data-page-node-id="ONGDYm0Dz33zmHhxzbFJW2">commands.find()</code> 查询（20 worker 场景约 2 QPS）。代价是改动 public record 构造会影响 <code data-page-node-id="uDaaAr9pzqs3uSFFYhBdc8">claim</code> 与相关测试。<strong data-page-node-id="Rn37ZlqKw6I6BuQkS3XAGH">建议列为独立优化项</strong>，避免扩大本次改动面。</p>
+
+  <div class="note" data-page-node-id="nT2ySJHoilEhQZJCx8Zj9m"><strong data-page-node-id="H4JwMqpLDtpG9Bzd4HrTNf">无需数据库迁移。</strong>方案 A 仅改变判定逻辑，<code data-page-node-id="AR5wDM53AdENWcN36tKqgX">deadline_at</code> 列已存在于 <code data-page-node-id="rYwnglBuRFnWOpz1lG4wKp">agent_command</code> 表。这是相对方案 B 的关键优势。</div>
+</section>
+
+<section data-page-node-id="THTadlmZOntvb7TcSCmWKz">
+  <h2 data-page-node-id="sid7LuQ5BDrpBLSxsHr4Hv">5. 测试计划</h2>
+
+  <h3 data-page-node-id="q82NVIz5dH4800Xz5okWmB">5.1 必须修改的既有测试</h3>
+  <div class="danger" data-page-node-id="an98065ajL0uiVRRr0ysef"><code data-page-node-id="hL5cztxFnvQSBiAXaIxH1L">CommandWorkerTest.staleOrMissingStartTimeControlsLeaseRenewal</code> 中的断言 <code data-page-node-id="GEOCQVK9sDRqjmCpSNBX46">assertFalse(shouldRenewLease(...))</code> 已把"按首次开始时间判定"这一<strong data-page-node-id="OFAeOjSns6YJtnP4Z5uvCL">缺陷行为固化为正确行为</strong>。修复必须同步改写此测试，否则会立即失败。</div>
+
+  <h3 data-page-node-id="izr4MqFMRTmBr26xNqRx0c">5.2 新增测试</h3>
+  <table data-page-node-id="wL84WagBbQYMv7J8W9f5bA">
+    <tr data-page-node-id="76e1y0haK2NeJkbCPhYmTp"><th data-page-node-id="P9QryeNOoh4k5hqZojNjv1">测试</th><th data-page-node-id="PjVgTizZ8Fs9i3FacYyqfn">锁定不变量</th><th data-page-node-id="xIj7tRiT75VgWqNglfmmFu">预期</th></tr>
+    <tr data-page-node-id="I4q7KjQ2VK4KYAJKPMgLWo"><td data-page-node-id="bKATtenJQ7INLXXUd7C5eE"><code data-page-node-id="i4INAXAaN6Bcu7EucpP5sE">renewsLeaseForCommandRunningBeyondNinetySeconds</code></td><td data-page-node-id="40W9VEBIrXLtjPRh27OfEA">I1</td><td data-page-node-id="ChYfHz1e8pkZRtF1q1dyt9">已运行 180 秒、<code data-page-node-id="8S0riciAB54gPPNuqD1m48">deadlineAt</code> 仍有余量 → <strong data-page-node-id="AwP0aDInZ9eoKdXC7zY0Kk">继续续租</strong>（<strong data-page-node-id="DKzUqqA7WCK9njPigklcgD">本条直接锁死 P2，是最重要的回归测试</strong>）</td></tr>
+    <tr data-page-node-id="6qOqPCW9tNk0Be9jpleCXt"><td data-page-node-id="3UIjhV4zV4H5kh1NQkX723"><code data-page-node-id="ANflAswMsU9PmnvqY7BiDj">stopsRenewingWhenDeadlinePassed</code></td><td data-page-node-id="vBS79G4JPllcBbqxvXEXvA">I2</td><td data-page-node-id="08iR2cVkdzOpm13Rdj4aYa"><code data-page-node-id="InehrCUnNrlRmHHSeerWXv">deadlineAt</code> 已过 → 停止续租</td></tr>
+    <tr data-page-node-id="DDhzY9iEFLu94jHAZPXof7"><td data-page-node-id="CsFC8AvWBfE9p6S15Airp8"><code data-page-node-id="JwXVZGD5En2Qydx8QVCADV">stopsRenewingWhenCancellationRequested</code></td><td data-page-node-id="AUqQJv0c2heK19vnDTOFEv">I2</td><td data-page-node-id="BTrTK3nmxfCpR43epMNTk9"><code data-page-node-id="PMENcr9rLTD1UVdkBDm1kx">cancel_requested = true</code> → 停止续租</td></tr>
+    <tr data-page-node-id="UliWBKFuW3ybFa5VJbfQAY"><td data-page-node-id="GFaZZUx9hCvXrZwmri3luC"><code data-page-node-id="empsNvUC6UBnCm1MxQzp91">treatsNullDeadlineAsRenewable</code></td><td data-page-node-id="FfxK6sgdo9lWwmTkuDcbLl">I2</td><td data-page-node-id="M9vyTwHMuXQzw058FFQ2cN"><code data-page-node-id="gI8AxYVik9hQx23Of7DGUc">deadlineAt == null</code> → 继续续租（保持既有防御语义）</td></tr>
+    <tr data-page-node-id="gaO0jQ4X3JYjnyggTSIZOp"><td data-page-node-id="1SgQ6WP2SGOquaMaMFdvsE"><code data-page-node-id="013WtY8E2BxE5Ov3kw77RX">deadlineTerminationRecordsDeadlineExceeded</code></td><td data-page-node-id="E1HEGRZJVLunHvVK35T6dm">I5</td><td data-page-node-id="h2FbQfBy4B28eLe1Yor4Nq">期限届满中断 → <code data-page-node-id="KaYXUqjcjFvPa4kGa1S6Qg">COMMAND_DEADLINE_EXCEEDED</code>，而非通用 <code data-page-node-id="YmYldoT2vf1KC2JBuqDQcU">COMMAND_EXECUTION_FAILED</code></td></tr>
+    <tr data-page-node-id="fQlvBlkd6gE4FZBIdBIDch"><td data-page-node-id="PiSoEhuM0BPnpZCRNkdeAB"><code data-page-node-id="LDtnktMdzlsnECkCYz1eX5">cancellationMarksCommandCancelled</code></td><td data-page-node-id="tsKTcRb5qNGmG9M9eTKZY2">I5</td><td data-page-node-id="Lwl7WmCLmT4CAhphbyY1Gr">用户取消中断 → <code data-page-node-id="bWJ007n1qEDirf0pLdAcWS">status = CANCELLED</code></td></tr>
+  </table>
+
+  <h3 data-page-node-id="NFgMhuxvgVKuGLgzedUQA1">5.3 集成测试（需 Docker，非本次必做）</h3>
+  <p data-page-node-id="FgUTBvHjN9GGk2jZ5vfhXi">补充"PLANNING 命令运行 90–210 秒仍能正常完成"的端到端用例。</p>
+</section>
+
+<section data-page-node-id="VAALuAX8buUEsbByN0AT4W">
+  <h2 data-page-node-id="hFvpMce3ZFRqo4mcjG5iJk">6. 风险与回滚</h2>
+  <table data-page-node-id="cHhJo2ZEAaSHOARuSajmgM">
+    <tr data-page-node-id="BUvCf9U2t99neHhUb6KdvH"><th data-page-node-id="GbmuJIeYPVAHPZxVjE1ECh">风险</th><th data-page-node-id="UQPXAn9LPEB1ES0YMUl6Gm">评估</th><th data-page-node-id="al4roQmmYlLQnRXsNqJJ2c">缓解</th></tr>
+    <tr data-page-node-id="VFEMHNQSZ5WTHOSpGwOxCW"><td data-page-node-id="0R1OjIcdVqVwznHWHXGsJ4">假死线程占用租约至期限届满</td><td data-page-node-id="1cZUIqARfDkBJgCy4xe3mp">低。PLANNING 上界 210 秒，有界；崩溃实例由 <code data-page-node-id="vrFsGy3SFmHWi6VoUkuqr1">recoverExpired()</code> 兜底</td><td data-page-node-id="iBeXxMnhFiNApL3LwKhcmH">监控 <code data-page-node-id="2voU4MHysbiIusj4sHl4uE">buyforu_lease_recovered_total</code> 与新增的 <code data-page-node-id="qGfxauDoLCija5mqUQIXkF">buyforu_command_deadline_terminated_total</code></td></tr>
+    <tr data-page-node-id="rDh1FHiZ1RK8SZ6rdP0hU1"><td data-page-node-id="hZG72JgHdqxtORZVqDa0Qw"><code data-page-node-id="nhtuVPE12DnrD7ZwJM1VuQ">shouldRenewLease</code> 签名变更导致测试失败</td><td data-page-node-id="wizDtm5f2jduGxleWc5CF3">必然发生，属预期</td><td data-page-node-id="DfuJwdbQkn0dMdIMZFhTWj">同步改写（该测试固化的是缺陷行为）</td></tr>
+    <tr data-page-node-id="xIeoNDXwdPDF5mjvsSozQn"><td data-page-node-id="4Dcr4BH873raM5OOUEZAKu">中断分类误判</td><td data-page-node-id="CUQzrkI9LVgYfabwWeHJd9">低。<code data-page-node-id="Zy0q0hHhPm2Htk5CAWIYPB">cancellationRequested</code> 直接读数据库标志位</td><td data-page-node-id="PU7ZYNCWsQVaFotwZFPivK">用场景化测试覆盖两种分支</td></tr>
+    <tr data-page-node-id="bpftrogijDUY0NwNltB1yj"><td data-page-node-id="pJqTsLqSifgpxPZ1CxLUyG">心跳停止后命令未被及时回收</td><td data-page-node-id="3FzXwgmzlsZOzvbP4i3Apd">低。<code data-page-node-id="WLCAuSFIIROWnwi6HT7YVq">recoverExpired()</code> 每 5 秒扫描 <code data-page-node-id="B4pzekUvzlvVOaHBnVBo10">lease_until &lt;= now</code></td><td data-page-node-id="uWkfXYjF2D3bUj43Xf8u7o">无需额外处理</td></tr>
+  </table>
+  <div class="note" data-page-node-id="CB5jhPQdv5CWV6VzeY3MVz"><strong data-page-node-id="57qVRUhlbCegxJ4EmNkNop">回滚：</strong>改动集中在 <code data-page-node-id="qdgISdDOeABehMI1jTlhcB">CommandWorker</code> 的 <code data-page-node-id="qqUdsISZWxpcKWkUtYCFIs">heartbeat()</code>、<code data-page-node-id="iLVzD3leLlySmPDBgosTVQ">shouldRenewLease()</code> 与 <code data-page-node-id="47rVHs76nDGMRsjp7YRMpj">execute()</code> 三个方法内，无数据库迁移、无 Schema 变更，可单点回滚至 <code data-page-node-id="COa3r7m6LVntzZTeEOFKVS">0d96ffc</code> 行为。</div>
+</section>
+
+<section data-page-node-id="ohhh9U1ntgZFgfITpjelf8">
+  <h2 data-page-node-id="mKipLV7AHro3GLFxhvGYYU">7. 执行清单</h2>
+  <ol data-page-node-id="Nm1iK6ZFNmPiRSn9vs129J">
+    <li data-page-node-id="nnwCeSo6DcSAoJq3PmC6Oa">修改 <code data-page-node-id="0TU8BxvKssVO4tj7v2qH8b">CommandWorker.shouldRenewLease()</code> 签名为 <code data-page-node-id="iZO6huNntIPLfoWUnFuBNV">(Instant deadlineAt, Instant now)</code>。</li>
+    <li data-page-node-id="f4ZAQYeiN7f2HWHWfupbqk">修改 <code data-page-node-id="ChWLdmES1wUr1MvXFvSNIW">CommandWorker.heartbeat()</code> 判据，删除 <code data-page-node-id="Kvk7aLLNIzhf736ldeSGLL">minusSeconds(90)</code>。</li>
+    <li data-page-node-id="4ksUywxZ7vcGqyib6izR4h">在 <code data-page-node-id="FJfNZtq2aUMivlIdGhTHnq">CommandWorker.execute()</code> 中 <code data-page-node-id="4dakpFLfFuemMSAeBwATA3">catch (RuntimeException)</code> <strong data-page-node-id="BX43vAtfzegBae5ry4FV42">之前</strong>插入 <code data-page-node-id="nqNKwNoIScvGa965kzSLsQ">DependencyInterruptedException</code> 分支。</li>
+    <li data-page-node-id="1IbcrKKbiTvFaki7AAKOwc">在 <code data-page-node-id="So2hBGCDs05Lvb5HQP18YL">safeMessage()</code> 中补充 <code data-page-node-id="OPwAgrikoxGPCTmbyTQaPy">COMMAND_DEADLINE_EXCEEDED</code> 文案。</li>
+    <li data-page-node-id="iHpoVRorwix9tE5bvpmO9E">改写 <code data-page-node-id="hj0qEwJ5LlJCuFmyBOJYY3">CommandWorkerTest.staleOrMissingStartTimeControlsLeaseRenewal</code>。</li>
+    <li data-page-node-id="K2KldrtYi8T0ut6xw3FDRM">新增 §5.2 的 6 条测试。</li>
+    <li data-page-node-id="HSlyMSr3ulvJJ24EpGkmc5">运行 <code data-page-node-id="G54AN62mazLZXYufLXbKsC">./mvnw test</code> 验证全绿（基线 151 通过，改后应 ≥156）。</li>
+    <li data-page-node-id="yEw4uzBC8w0k5Qb5ZQrmBh">更新 <code data-page-node-id="dFWRBFbtSMKuhMOKrz4SO4">docs/CORRECTNESS_REVIEW_FIXES.md</code>，按项目惯例记录失败场景、不变量与修复方式。</li>
+  </ol>
+</section>
+
+<footer data-page-node-id="puwReDqtBt42VXYnk04FPR">BuyForU 修复方案 ｜ 2026-09-03 ｜ 由 WorkBuddy 生成 ｜ 评审通过后再执行代码改动</footer>
+</div>
+</body>
+</html>

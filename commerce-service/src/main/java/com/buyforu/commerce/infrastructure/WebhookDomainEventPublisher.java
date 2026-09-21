@@ -4,12 +4,14 @@ import com.buyforu.commerce.application.DomainEventPublisher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.HexFormat;
 
 /** 生产环境事件发布器：使用 HMAC-SHA256 签名，失败由 OutboxDispatcher 负责重试。 */
@@ -28,7 +30,10 @@ public class WebhookDomainEventPublisher implements DomainEventPublisher {
         if (signingSecret == null || signingSecret.length() < 32) {
             throw new IllegalStateException("EVENT_SIGNING_SECRET must contain at least 32 characters");
         }
-        this.client = builder.baseUrl(webhookUrl).build();
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofSeconds(3));
+        factory.setReadTimeout(Duration.ofSeconds(10));
+        this.client = builder.baseUrl(webhookUrl).requestFactory(factory).build();
         this.signingSecret = signingSecret.getBytes(StandardCharsets.UTF_8);
     }
 
