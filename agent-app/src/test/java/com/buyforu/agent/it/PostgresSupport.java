@@ -33,6 +33,11 @@ public final class PostgresSupport {
         config.setUsername(postgres.getUsername());
         config.setPassword(postgres.getPassword());
         config.setMaximumPoolSize(poolSize);
+        // 必须与生产的 spring.datasource.hikari.connection-init-sql 保持一致。
+        // V1 迁移在 defaultSchema 下执行 `CREATE EXTENSION vector`，所以扩展落在 agent_schema；
+        // 连接上不设 search_path 时，`CAST(? AS vector)` 会报 "type vector does not exist"，
+        // 看起来像 SQL 写错了，实际是测试环境少复现了生产的一条连接前置条件。
+        config.setConnectionInitSql("SET search_path TO agent_schema, public");
         HikariDataSource dataSource = new HikariDataSource(config);
         Flyway.configure()
                 .dataSource(dataSource)

@@ -1,17 +1,69 @@
-[
-  {
-    "query": "7 天无理由退货要满足什么条件",
-    "mustIncludeDocumentIds": ["policy-return-7d"],
-    "minHits": 1
+{
+  "version": 2,
+  "description": "RAG 召回评测金标集。query 一律用口语，语料一律用书面语，刻意制造词汇差异——只有这样才能验证是语义召回在起作用，而不是关键词命中。",
+  "corpusDir": "corpus",
+  "note": "语料清单不在这里维护——由 corpusDir 目录下的 .md 文件推导，避免第二份副本漂移。expectedDocumentIds 填文件名去掉 .md 后的逻辑 id。",
+  "retrieval": {
+    "topK": 5,
+    "threshold": 0.53,
+    "note": "必须与 SpringAiPlanningModel 中的 knowledge.retrieve(request, 5, 0.53) 保持一致。0.53 是标定值：当前嵌入模型（embeddinggemma）+ 整篇切块下相似度天花板约 0.62，原值 0.65 不可达会导致召回恒为空；扫描后安全窗口为 [0.515, 0.535]（下界由负样本最高分 0.5130 卡住，上界由最弱正样本 0.5365 卡住），取上界偏向精确率。仅由 8 条样本初步标定，扩样本或换模型/切块粒度后必须重标。"
   },
-  {
-    "query": "笔记本满减和包邮规则",
-    "mustIncludeDocumentIds": ["policy-promo-shipping"],
-    "minHits": 1
-  },
-  {
-    "query": "预占库存会锁多久",
-    "mustIncludeDocumentIds": ["policy-reservation"],
-    "minHits": 1
-  }
-]
+  "samples": [
+    {
+      "id": "return-window",
+      "kind": "positive",
+      "query": "我买的东西不想要了，最晚几天内能退",
+      "expectedDocumentIds": ["policy-return-7d"],
+      "minHits": 1
+    },
+    {
+      "id": "return-freight-who-pays",
+      "kind": "positive",
+      "query": "退回去的运费谁来出",
+      "expectedDocumentIds": ["policy-return-7d"],
+      "minHits": 1
+    },
+    {
+      "id": "promo-threshold",
+      "kind": "positive",
+      "query": "现在买满多少钱能便宜",
+      "expectedDocumentIds": ["policy-promo-shipping"],
+      "minHits": 1
+    },
+    {
+      "id": "shipping-fee",
+      "kind": "positive",
+      "query": "运费怎么收，多少钱就不用付运费了",
+      "expectedDocumentIds": ["policy-promo-shipping"],
+      "minHits": 1
+    },
+    {
+      "id": "quote-expiry",
+      "kind": "positive",
+      "query": "给我算完价我放着没管，过会儿还算数吗",
+      "expectedDocumentIds": ["policy-reservation"],
+      "minHits": 1
+    },
+    {
+      "id": "reservation-ttl",
+      "kind": "positive",
+      "query": "下单前锁住的货能给我留多长时间",
+      "expectedDocumentIds": ["policy-reservation"],
+      "minHits": 1
+    },
+    {
+      "id": "negative-address-change",
+      "kind": "negative",
+      "query": "已经在路上的订单怎么改收货地址",
+      "expectedDocumentIds": [],
+      "maxHits": 0
+    },
+    {
+      "id": "negative-invoice",
+      "kind": "negative",
+      "query": "买完能不能开增值税专用发票",
+      "expectedDocumentIds": [],
+      "maxHits": 0
+    }
+  ]
+}
