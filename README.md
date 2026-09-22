@@ -4,6 +4,12 @@ BuyForU 是一个以真实交易约束为边界的电商购物 Agent。Agent 负
 
 项目的完整需求边界、架构、一致性、高并发设计和面试问答见 [项目设计与面试指南](docs/PROJECT_DESIGN.md)。本轮发现的问题、修复依据和回归方式见 [全链路 Review 与修复记录](docs/CORRECTNESS_REVIEW_FIXES.md)。第一次阅读代码也可以先看 [中文代码结构导览](docs/CODE_GUIDE.md)；需要逐文件查找职责时看 [文件职责索引](docs/FILE_INDEX.md)。
 
+## 界面预览
+
+![BuyForU 商城界面：自然语言提出需求后，右侧 AI 导购面板停在「确认金额」阶段，列出商品金额、运费、最终应付与库存临时锁定倒计时](docs/assets/shop-interface.png)
+
+左侧是带实时可售数量的商品陈列，右侧是 AI 导购面板。上图停在「确认金额」阶段：需求以自然语言提交，候选商品由检索产生；商品金额、运费和最终应付由 Commerce 计算并写入确认快照，库存被临时锁定并显示释放倒计时。只有用户点「确认创建订单」才会真正落库。
+
 ## 当前实现
 
 - Spring AI 通过 OpenAI 兼容协议调用真实 DeepSeek Chat API，输出结构化 `PlanSpec`；没有确定性模型降级。
