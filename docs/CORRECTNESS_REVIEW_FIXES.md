@@ -1,7 +1,7 @@
 # BuyForU 需求演进、Review 与修复记录
 
 > 这份文档记录“为什么这样实现、Review 发现了什么、代码如何修复、如何验证”。
-> 总体架构、API、数据模型见 [PROJECT_DESIGN.md](PROJECT_DESIGN.md)。
+> 总体架构、API 与数据模型见 [PROJECT_DESIGN.md](PROJECT_DESIGN.md)。
 >
 > 基线：`fix/correctness-and-acceptance` 当前工作区，日期：2026-08-14。
 

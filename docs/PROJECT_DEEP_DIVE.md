@@ -184,7 +184,6 @@ UPDATE ... SET available_quantity = available_quantity - ?, version = version + 
 WHERE sku_id = ? AND version = ?     -- 追加版本条件，并检查影响行数是否为 1
 ```
 
-
 ---
 
 ## 2. 崩溃恢复：三层状态分工
