@@ -175,6 +175,23 @@ class InMemoryCommerceEngineTest {
     }
 
     @Test
+    void negativeProductTermIsExcludedBeforeQueryFallback() {
+        InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
+                new InMemoryCommerceEngine.CatalogItem("p-game", "sku-game", "Nova Forge 16 游戏本", "Nova", "laptop",
+                        java.util.Map.of("memory", "16GB"), new java.math.BigDecimal("4999"), 5),
+                new InMemoryCommerceEngine.CatalogItem("p-air", "sku-air", "Aurora Air 16 轻薄本", "Aurora", "laptop",
+                        java.util.Map.of("memory", "16GB"), new java.math.BigDecimal("4999"), 5)));
+        SearchRequest request = new SearchRequest("u-1", "不要游戏本，只要轻薄本", "laptop",
+                null, null, List.of(), java.util.Map.of(), "addr-1", null, 1, 10,
+                List.of("游戏本"));
+
+        List<ProductCandidate> candidates = engine.searchProducts(request).candidates();
+
+        assertEquals(1, candidates.size());
+        assertEquals("sku-air", candidates.getFirst().skuId());
+    }
+
+    @Test
     void concurrentReservationsNeverOversell() throws Exception {
         InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
                 new InMemoryCommerceEngine.CatalogItem("p", "last-sku", "Last item", "Brand", "test",

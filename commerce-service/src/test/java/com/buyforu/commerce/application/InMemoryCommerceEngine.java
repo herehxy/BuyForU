@@ -97,6 +97,8 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
         List<InMemoryCommerceEngine.CatalogItem> hardMatches = catalog.values().stream()
                 .filter(item -> category == null || category.equalsIgnoreCase(item.category()))
                 .filter(item -> request.excludedBrands().stream().noneMatch(b -> b.equalsIgnoreCase(item.brand())))
+                .filter(item -> request.excludedTerms().stream()
+                        .noneMatch(term -> searchText(item).toLowerCase().contains(term.toLowerCase())))
                 .filter(item -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
                         .entrySet().stream()
                         .allMatch(e -> e.getValue().equalsIgnoreCase(item.attributes().get(e.getKey()))))

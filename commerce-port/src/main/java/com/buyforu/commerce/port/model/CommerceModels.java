@@ -68,16 +68,26 @@ public final class CommerceModels {
             String addressId,
             LocalDate deliveryBy,
             int quantity,
-            int limit
+            int limit,
+            List<String> excludedTerms
     ) {
         public SearchRequest {
             Objects.requireNonNull(userId, "userId");
             if (userId.isBlank()) throw new IllegalArgumentException("userId is required");
             excludedBrands = excludedBrands == null ? List.of() : List.copyOf(excludedBrands);
             requiredAttributes = requiredAttributes == null ? Map.of() : Map.copyOf(requiredAttributes);
+            excludedTerms = excludedTerms == null ? List.of() : List.copyOf(excludedTerms);
             if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
             if (quantity > 99) throw new IllegalArgumentException("quantity cannot exceed 99");
             limit = limit <= 0 ? 10 : Math.min(limit, 50);
+        }
+
+        /** Compatibility constructor for callers that do not use negative product terms. */
+        public SearchRequest(String userId, String query, String category, Money budgetMax, Money budgetMin,
+                             List<String> excludedBrands, Map<String, String> requiredAttributes,
+                             String addressId, LocalDate deliveryBy, int quantity, int limit) {
+            this(userId, query, category, budgetMax, budgetMin, excludedBrands, requiredAttributes,
+                    addressId, deliveryBy, quantity, limit, List.of());
         }
 
         /** 旧调用没有预算下限；保留此重载避免本地 SNAPSHOT 和模块编译顺序不一致。 */
@@ -85,7 +95,7 @@ public final class CommerceModels {
                              List<String> excludedBrands, Map<String, String> requiredAttributes,
                              String addressId, LocalDate deliveryBy, int quantity, int limit) {
             this(userId, query, category, budgetMax, null, excludedBrands, requiredAttributes,
-                    addressId, deliveryBy, quantity, limit);
+                    addressId, deliveryBy, quantity, limit, List.of());
         }
     }
 

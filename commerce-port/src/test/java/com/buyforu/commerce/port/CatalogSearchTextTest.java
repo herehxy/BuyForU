@@ -34,4 +34,14 @@ class CatalogSearchTextTest {
         assertTrue(CatalogSearchText.matches("降噪耳机", "Hush Studio 耳机 anc=yes"));
         assertFalse(CatalogSearchText.matches("显示器", "Aurora Air 16 轻薄本"));
     }
+
+    @Test
+    void extractsNegativeCatalogTermsWithoutTurningThemIntoPositiveMatches() {
+        List<String> excluded = CatalogSearchText.excludedTerms("不要游戏本，只要轻薄本");
+        List<String> positive = CatalogSearchText.tokens("不要游戏本，只要轻薄本");
+
+        assertTrue(excluded.contains("游戏本"));
+        assertTrue(positive.contains("轻薄本"));
+        assertFalse(positive.contains("游戏"));
+    }
 }

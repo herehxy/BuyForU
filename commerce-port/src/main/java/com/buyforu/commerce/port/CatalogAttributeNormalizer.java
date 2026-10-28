@@ -28,7 +28,7 @@ public final class CatalogAttributeNormalizer {
     }
 
     private static String canonicalKey(String key) {
-        String k = key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
+        String k = key.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "").replace(" ", "");
         return switch (k) {
             case "memory", "memorygb", "ram", "ramgb", "内存" -> "memory";
             case "storage", "storagegb", "ssd", "disk", "容量" -> "storage";

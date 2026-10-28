@@ -122,6 +122,7 @@ class CommandWorkerPermitTest {
 
         assertEquals(PERMITS, permits.availablePermits(),
                 "线程池拒绝执行时许可仍归调用方，必须原地归还");
+        verify(fairQueue).releaseUser(command.userId(), command.commandId());
         // 证明用例确实走到了提交这一步，而不是被"命令已过期"分支提前拦下。
         verify(rejecting).submit(any(Runnable.class));
     }

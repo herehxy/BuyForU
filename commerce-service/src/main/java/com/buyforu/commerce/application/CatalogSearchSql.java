@@ -44,6 +44,18 @@ final class CatalogSearchSql {
             args.add(arrayLiteral(request.excludedBrands().stream()
                     .map(value -> value.toLowerCase(Locale.ROOT)).toList()));
         }
+        if (!request.excludedTerms().isEmpty()) {
+            sql.append("""
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM unnest(CAST(? AS text[])) AS excluded(token)
+                          WHERE lower(concat_ws(' ', p.name, p.brand, p.category, p.attributes::text))
+                                LIKE '%' || lower(token) || '%'
+                      )
+                    """);
+            args.add(arrayLiteral(request.excludedTerms().stream()
+                    .map(value -> value.toLowerCase(Locale.ROOT)).toList()));
+        }
         var attributes = CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes());
         if (!attributes.isEmpty()) {
             sql.append("""

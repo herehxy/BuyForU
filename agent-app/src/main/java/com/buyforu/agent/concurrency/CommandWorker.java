@@ -194,6 +194,9 @@ public class CommandWorker {
         for (int index = 0; index < maxCommands; index++) {
             if (!permits.tryAcquire()) break;
             boolean handedOver = false;
+            boolean userPermitHeld = false;
+            String acquiredUserId = null;
+            UUID acquiredCommandId = null;
             boolean stop = false;
             try {
                 UUID id;
@@ -220,6 +223,9 @@ public class CommandWorker {
                     stop = true;
                     break;
                 }
+                userPermitHeld = true;
+                acquiredUserId = command.userId();
+                acquiredCommandId = command.commandId();
                 handedOver = handOver(command, permits, executor, true);
                 if (handedOver) dispatched++;
                 else stop = true;
@@ -228,7 +234,18 @@ public class CommandWorker {
                 log.warn("Dispatch for the {} lane failed; returning its worker permit", lane, dispatchFailure);
                 stop = true;
             } finally {
-                if (!handedOver) permits.release();
+                if (!handedOver) {
+                    // handOver 失败时 execute 不会运行，用户许可必须由派发方归还；
+                    // 否则线程池短暂拒绝会让该用户被阻塞到 Redis TTL 到期。
+                    if (userPermitHeld) {
+                        try {
+                            fairQueue.releaseUser(acquiredUserId, acquiredCommandId);
+                        } catch (RuntimeException releaseFailure) {
+                            log.warn("Could not release the user permit after dispatch failure", releaseFailure);
+                        }
+                    }
+                    permits.release();
+                }
             }
             if (stop) break;
         }

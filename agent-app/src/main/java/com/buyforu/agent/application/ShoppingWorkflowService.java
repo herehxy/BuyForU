@@ -6,6 +6,7 @@ import com.buyforu.agent.domain.ReplanController;
 import com.buyforu.agent.domain.ShoppingAgentState;
 import com.buyforu.agent.domain.ShoppingAgentState.*;
 import com.buyforu.commerce.port.CatalogAttributeNormalizer;
+import com.buyforu.commerce.port.CatalogSearchText;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.CommerceOperationException;
 import com.buyforu.commerce.port.model.CommerceModels.*;
@@ -372,7 +373,8 @@ public class ShoppingWorkflowService {
         PlanSpec.ShoppingConstraints c = state.planSpec().normalizedConstraints();
         SearchResult result = commerce.searchProducts(new SearchRequest(state.userId(), c.query(), c.category(),
                 c.budgetMax(), c.budgetMin(),
-                c.excludedBrands(), c.requiredAttributes(), c.addressId(), c.deliveryBy(), c.quantity(), 10));
+                c.excludedBrands(), c.requiredAttributes(), c.addressId(), c.deliveryBy(), c.quantity(), 10,
+                CatalogSearchText.excludedTerms(state.originalRequest())));
         if (!result.queryMatched()) {
             meters.counter("buyforu_search_query_unmatched_total").increment();
         }

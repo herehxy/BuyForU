@@ -108,6 +108,7 @@ class CommerceModelsTest {
                     null, null, "addr-1", null, 1, 10);
             assertTrue(request.excludedBrands().isEmpty());
             assertTrue(request.requiredAttributes().isEmpty());
+            assertTrue(request.excludedTerms().isEmpty());
         }
     }
 

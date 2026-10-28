@@ -69,7 +69,7 @@ ShoppingWorkflowService.planNewRun
   -> 固定图按照 PlanSpec 数据执行
 ```
 
-商品搜索使用 `CatalogSearchText` 将中文口语扩成词项，`CatalogSearchSql` 在 SQL 的 `LIMIT` 前完成品类、库存、品牌、规格和 query 过滤；没有 query 命中时回退到硬约束候选，并通过 `queryMatched` 暴露回退状态。
+商品搜索使用 `CatalogSearchText` 将中文口语扩成词项，并提取“不要/排除”后的负向商品词作为硬排除条件。`CatalogSearchSql` 在 SQL 的 `LIMIT` 前完成品类、库存、品牌、规格、否定词和 query 过滤；没有 query 命中时回退到硬约束候选，并通过 `queryMatched` 暴露回退状态。
 
 `CommandWorker` 的每个调度周期会按 Worker 额度批量派发，CONTROL 先于后台 lane 执行；`CommandRepository.controlReady` 同时接收到期且未超过 deadline 的 `QUEUED/RETRY_WAIT` 控制命令。
 

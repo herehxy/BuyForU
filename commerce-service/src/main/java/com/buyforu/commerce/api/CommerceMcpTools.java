@@ -148,11 +148,13 @@ public final class CommerceMcpTools {
             @McpToolParam(description = "Latest acceptable delivery date", required = false)
             java.time.LocalDate deliveryBy,
             @McpToolParam(description = "Purchase quantity", required = true) int quantity,
-            @McpToolParam(description = "Max candidates", required = false) Integer limit
+            @McpToolParam(description = "Max candidates", required = false) Integer limit,
+            @McpToolParam(description = "Product terms that must be excluded", required = false)
+            java.util.List<String> excludedTerms
     ) {
         SearchRequest toDomain() {
             return new SearchRequest(userId, query, category, budgetMax, budgetMin, excludedBrands, requiredAttributes,
-                    addressId, deliveryBy, quantity, limit == null ? 10 : limit);
+                    addressId, deliveryBy, quantity, limit == null ? 10 : limit, excludedTerms);
         }
     }
 
