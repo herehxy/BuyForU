@@ -12,4 +12,5 @@ web/dist/
 reports/k6/
 .workbuddy/
 .claude/
+.superpowers/
 .VSCodeCounter/
