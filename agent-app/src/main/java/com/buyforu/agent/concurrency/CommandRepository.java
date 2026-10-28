@@ -98,8 +98,9 @@ public class CommandRepository {
                 SELECT c.*
                 FROM agent_schema.agent_command c
                 WHERE c.queue_class='CONTROL'
-                  AND c.status='QUEUED'
+                  AND c.status IN ('QUEUED','RETRY_WAIT')
                   AND c.available_at<=now()
+                  AND c.deadline_at>now()
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_schema.agent_run_execution x
                       WHERE x.run_id=c.run_id

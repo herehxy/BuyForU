@@ -65,15 +65,12 @@ public class CommandWorker {
 
     @Scheduled(fixedDelay = 100, scheduler = "dispatchScheduler")
     void dispatch() {
-        dispatchLane(AgentCommand.QueueClass.PLANNING, planningPermits, planning);
-        dispatchLane(AgentCommand.QueueClass.TRANSACTION, transactionPermits, transaction);
-        // 一次取多条可执行的 CONTROL，跳过租约还被占用的 run。
-        for (AgentCommand command : commands.controlReady(properties.controlWorkers())) {
-            if (!controlPermits.tryAcquire()) break;
-            // CONTROL 命令不占用户执行许可，因此这里没有释放用户许可的动作；
-            // handOver 返回 false 时许可仍归调用方，必须原地归还。
-            if (!handOver(command, controlPermits, control, false)) controlPermits.release();
-        }
+        // CONTROL 先跑：取消和拒绝不能被持续涌入的规划命令饿住。
+        dispatchControl();
+        dispatchBatch(AgentCommand.QueueClass.PLANNING, planningPermits, planning,
+                properties.planningWorkers());
+        dispatchBatch(AgentCommand.QueueClass.TRANSACTION, transactionPermits, transaction,
+                properties.transactionWorkers());
     }
 
     @Scheduled(fixedDelay = 5000, scheduler = "maintenanceScheduler")
@@ -185,31 +182,65 @@ public class CommandWorker {
      * 静态断言看不出"少还一个"或"多还一个"。
      */
     void dispatchLane(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor) {
-        if (!permits.tryAcquire()) return;
-        boolean handedOver = false;
-        try {
-            UUID id;
-            // Redis 协调层抖动时静默跳过：这是预期内的降级，不能按每个派发周期刷日志。
-            try { id = fairQueue.poll(lane); }
-            catch (RuntimeException coordinationUnavailable) { return; }
-            if (id == null) return;
-            AgentCommand command = commands.find(id).orElse(null);
-            if (command == null || (command.status() != AgentCommand.CommandStatus.QUEUED
-                    && command.status() != AgentCommand.CommandStatus.RETRY_WAIT)
-                    || command.deadlineAt().isBefore(Instant.now())) {
-                if (command != null) commands.markExpired(id);
-                return;
+        dispatchBatch(lane, permits, executor, 1);
+    }
+
+    /**
+     * 在一个调度周期内填满可用 Worker 额度。每条命令仍单独认领租约；
+     * 用户许可冲突时结束本轮，避免把同一条命令在队首反复弹出。
+     */
+    int dispatchBatch(AgentCommand.QueueClass lane, Semaphore permits, ExecutorService executor, int maxCommands) {
+        int dispatched = 0;
+        for (int index = 0; index < maxCommands; index++) {
+            if (!permits.tryAcquire()) break;
+            boolean handedOver = false;
+            boolean stop = false;
+            try {
+                UUID id;
+                // Redis 协调层抖动时静默跳过：这是预期内的降级，不能按每个派发周期刷日志。
+                try {
+                    id = fairQueue.poll(lane);
+                } catch (RuntimeException coordinationUnavailable) {
+                    return dispatched;
+                }
+                if (id == null) {
+                    stop = true;
+                    break;
+                }
+                AgentCommand command = commands.find(id).orElse(null);
+                if (command == null || (command.status() != AgentCommand.CommandStatus.QUEUED
+                        && command.status() != AgentCommand.CommandStatus.RETRY_WAIT)
+                        || command.deadlineAt().isBefore(Instant.now())) {
+                    if (command != null) commands.markExpired(id);
+                    stop = true;
+                    break;
+                }
+                if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
+                    fairQueue.enqueueFront(command);
+                    stop = true;
+                    break;
+                }
+                handedOver = handOver(command, permits, executor, true);
+                if (handedOver) dispatched++;
+                else stop = true;
+            } catch (RuntimeException dispatchFailure) {
+                meters.counter("buyforu_dispatch_failure_total", "queue_class", lane.name()).increment();
+                log.warn("Dispatch for the {} lane failed; returning its worker permit", lane, dispatchFailure);
+                stop = true;
+            } finally {
+                if (!handedOver) permits.release();
             }
-            if (!fairQueue.tryAcquireUser(command.userId(), command.commandId())) {
-                fairQueue.enqueueFront(command);
-                return;
-            }
-            handedOver = handOver(command, permits, executor, true);
-        } catch (RuntimeException dispatchFailure) {
-            meters.counter("buyforu_dispatch_failure_total", "queue_class", lane.name()).increment();
-            log.warn("Dispatch for the {} lane failed; returning its worker permit", lane, dispatchFailure);
-        } finally {
-            if (!handedOver) permits.release();
+            if (stop) break;
+        }
+        return dispatched;
+    }
+
+    private void dispatchControl() {
+        // CONTROL 命令不占用户执行许可，因此这里没有释放用户许可的动作；
+        // handOver 返回 false 时许可仍归调用方，必须原地归还。
+        for (AgentCommand command : commands.controlReady(properties.controlWorkers())) {
+            if (!controlPermits.tryAcquire()) break;
+            if (!handOver(command, controlPermits, control, false)) controlPermits.release();
         }
     }
 
