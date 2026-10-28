@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.Comparator;
 import java.util.Optional;
+import java.util.ArrayList;
 
 /**
  * 固定图节点背后的应用服务。
@@ -378,8 +379,13 @@ public class ShoppingWorkflowService {
     private static List<ProductCandidate> rankCandidates(List<ProductCandidate> candidates, PlanSpec plan) {
         // 排序偏好只改变展示顺序，绝不会改变预算、品牌排除等硬过滤结果。
         PlanSpec.ShoppingConstraints constraints = plan.normalizedConstraints();
-        Comparator<ProductCandidate> comparator = Comparator.comparing(candidate -> 0);
-        for (PlanSpec.RankingPreference preference : plan.rankingPreferences().reversed()) {
+        List<PlanSpec.RankingPreference> preferences = new ArrayList<>(plan.rankingPreferences());
+        if (!constraints.preferredBrands().isEmpty()
+                && !preferences.contains(PlanSpec.RankingPreference.BRAND_PREFERENCE)) {
+            preferences.addFirst(PlanSpec.RankingPreference.BRAND_PREFERENCE);
+        }
+        Comparator<ProductCandidate> comparator = null;
+        for (PlanSpec.RankingPreference preference : preferences.reversed()) {
             Comparator<ProductCandidate> next = switch (preference) {
                 case PRICE -> {
                     boolean floorOnly = constraints.budgetMin() != null && constraints.budgetMax() == null;
@@ -395,11 +401,11 @@ public class ShoppingWorkflowService {
                 case SPEC_MATCH -> Comparator.comparingInt(candidate ->
                         -matchingAttributes(candidate, constraints));
             };
-            comparator = next.thenComparing(comparator);
+            comparator = comparator == null ? next : next.thenComparing(comparator);
         }
-        return candidates.stream().sorted(comparator
-                .thenComparing(ProductCandidate::productId)
-                .thenComparing(ProductCandidate::skuId)).toList();
+        if (comparator == null) return List.copyOf(candidates);
+        // Java 的稳定排序会把相等候选保留为 Commerce 返回顺序，不能用 productId 覆盖。
+        return candidates.stream().sorted(comparator).toList();
     }
 
     private static int matchingAttributes(ProductCandidate candidate, PlanSpec.ShoppingConstraints constraints) {

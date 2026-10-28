@@ -1,6 +1,8 @@
 package com.buyforu.commerce.application;
 
 import com.buyforu.commerce.port.CatalogAttributeNormalizer;
+import com.buyforu.commerce.port.CatalogSearchText;
+import com.buyforu.commerce.port.CatalogVocabulary;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 
@@ -88,12 +90,12 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
 
     @Override
     public SearchResult searchProducts(SearchRequest request) {
-        String q = request.query() == null ? "" : request.query().toLowerCase();
-        List<ProductCandidate> matches = catalog.values().stream()
-                .filter(item -> request.category() == null || request.category().isBlank()
-                        || request.category().equalsIgnoreCase(item.category()))
-                .filter(item -> q.isBlank() || item.name().toLowerCase().contains(q)
-                        || item.category().toLowerCase().contains(q))
+        String canonicalCategory = request.category() == null || request.category().isBlank() ? null
+                : CatalogVocabulary.category(request.category());
+        String category = canonicalCategory == null && request.category() != null && !request.category().isBlank()
+                ? request.category() : canonicalCategory;
+        List<InMemoryCommerceEngine.CatalogItem> hardMatches = catalog.values().stream()
+                .filter(item -> category == null || category.equalsIgnoreCase(item.category()))
                 .filter(item -> request.excludedBrands().stream().noneMatch(b -> b.equalsIgnoreCase(item.brand())))
                 .filter(item -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
                         .entrySet().stream()
@@ -106,12 +108,23 @@ public final class InMemoryCommerceEngine implements CommerceGateway {
                     return request.budgetMin() == null || payableAmount.compareTo(request.budgetMin().amount()) >= 0;
                 })
                 .sorted(Comparator.comparing(CatalogItem::unitPrice))
+                .toList();
+        List<CatalogItem> queryMatches = hardMatches.stream()
+                .filter(item -> CatalogSearchText.matches(request.query(), searchText(item)))
+                .toList();
+        boolean queryMatched = CatalogSearchText.tokens(request.query()).isEmpty() || !queryMatches.isEmpty();
+        List<CatalogItem> selected = queryMatches.isEmpty() ? hardMatches : queryMatches;
+        List<ProductCandidate> candidates = selected.stream()
                 .limit(request.limit())
                 .map(item -> new ProductCandidate(item.productId(), item.skuId(), item.name(), item.brand(),
                         item.attributes(), new Money(item.unitPrice(), "CNY"), available(item.skuId()),
                         LocalDate.now(clock).plusDays(1)))
                 .toList();
-        return new SearchResult(matches, clock.instant());
+        return new SearchResult(candidates, clock.instant(), queryMatched);
+    }
+
+    private static String searchText(CatalogItem item) {
+        return item.name() + " " + item.brand() + " " + item.category() + " " + item.attributes();
     }
 
     @Override

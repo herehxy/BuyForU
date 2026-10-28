@@ -139,6 +139,42 @@ class InMemoryCommerceEngineTest {
     }
 
     @Test
+    void naturalLanguageChineseQueryMatchesCatalogTerms() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+
+        SearchResult result = engine.searchProducts(new SearchRequest("u-1", "想买一台轻薄本", "laptop",
+                null, null, List.of(), java.util.Map.of(), "addr-1", null, 1, 10));
+
+        assertFalse(result.candidates().isEmpty());
+        assertTrue(result.queryMatched());
+    }
+
+    @Test
+    void unmatchedQueryFallsBackToHardConstraintCandidates() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+
+        SearchResult result = engine.searchProducts(new SearchRequest("u-1", "通勤", "laptop",
+                Money.cny("5000"), null, List.of(), java.util.Map.of(), "addr-1", null, 1, 10));
+
+        assertFalse(result.candidates().isEmpty());
+        assertFalse(result.queryMatched());
+    }
+
+    @Test
+    void queryFallbackStillAppliesBrandAndAttributeConstraints() {
+        InMemoryCommerceEngine engine = InMemoryCommerceEngine.seeded(clock);
+
+        SearchResult result = engine.searchProducts(new SearchRequest("u-1", "完全不存在的词", "laptop",
+                Money.cny("5000"), null, List.of("Pine"), java.util.Map.of("memory", "16GB"),
+                "addr-1", null, 1, 10));
+
+        assertFalse(result.candidates().isEmpty());
+        assertTrue(result.candidates().stream().noneMatch(candidate -> candidate.brand().equals("Pine")));
+        assertTrue(result.candidates().stream()
+                .allMatch(candidate -> "16GB".equals(candidate.attributes().get("memory"))));
+    }
+
+    @Test
     void concurrentReservationsNeverOversell() throws Exception {
         InMemoryCommerceEngine engine = new InMemoryCommerceEngine(clock, List.of(
                 new InMemoryCommerceEngine.CatalogItem("p", "last-sku", "Last item", "Brand", "test",

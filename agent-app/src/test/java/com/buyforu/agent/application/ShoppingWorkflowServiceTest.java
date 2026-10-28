@@ -365,6 +365,73 @@ class ShoppingWorkflowServiceTest {
         assertTrue(planned.planSpec().readTasks().contains(PlanSpec.ReadTask.SEARCH_PRODUCTS));
     }
 
+    @Test
+    void preservesCommerceOrderWhenModelOmitsRankingPreferences() {
+        PlanSpec.ShoppingConstraints fixed = constraints();
+        InMemoryCommerceEngine commerce = new InMemoryCommerceEngine(clock, List.of(
+                new InMemoryCommerceEngine.CatalogItem("p-z-pine", "sku-pine", "Pine Air", "Pine", "laptop",
+                        Map.of("memory", "16GB"), java.math.BigDecimal.valueOf(50), 5),
+                new InMemoryCommerceEngine.CatalogItem("p-a-aurora", "sku-aurora", "Aurora Air", "Aurora", "laptop",
+                        Map.of("memory", "16GB"), java.math.BigDecimal.valueOf(100), 5)));
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce,
+                fixedPlanModel(fixed, List.of(), fixed.preferredBrands()),
+                new InMemoryAgentRunStore(), new InMemoryConversationMemory(), clock);
+
+        ShoppingAgentState state = workflow.start("stable-order", "user-1", "轻薄本", fixed);
+
+        assertEquals("sku-pine", state.candidateSet().getFirst().skuId(),
+                "没有排序偏好时必须保留 Commerce 的输入顺序");
+    }
+
+    @Test
+    void appliesPreferredBrandEvenWhenModelOmitsBrandPreference() {
+        PlanSpec.ShoppingConstraints fixed = new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"),
+                null, List.of("Aurora"), List.of(), Map.of("memory", "16GB"), 1,
+                "address-1", LocalDate.of(2026, 8, 13), 1);
+        InMemoryCommerceEngine commerce = new InMemoryCommerceEngine(clock, List.of(
+                new InMemoryCommerceEngine.CatalogItem("p-a-pine", "sku-pine", "Pine Air", "Pine", "laptop",
+                        Map.of("memory", "16GB"), java.math.BigDecimal.valueOf(50), 5),
+                new InMemoryCommerceEngine.CatalogItem("p-z-aurora", "sku-aurora", "Aurora Air", "Aurora", "laptop",
+                        Map.of("memory", "16GB"), java.math.BigDecimal.valueOf(100), 5)));
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(commerce,
+                fixedPlanModel(fixed, List.of(), fixed.preferredBrands()),
+                new InMemoryAgentRunStore(), new InMemoryConversationMemory(), clock);
+
+        ShoppingAgentState state = workflow.start("brand-order", "user-1", "偏好 Aurora 的轻薄本", fixed);
+
+        assertEquals("sku-aurora", state.candidateSet().getFirst().skuId(),
+                "用户偏好品牌不能被模型是否输出 BRAND_PREFERENCE 决定");
+    }
+
+    private static PlanningModel fixedPlanModel(PlanSpec.ShoppingConstraints constraints,
+                                                List<PlanSpec.RankingPreference> preferences,
+                                                List<String> preferredBrands) {
+        PlanSpec.ShoppingConstraints withBrands = new PlanSpec.ShoppingConstraints(
+                constraints.query(), constraints.category(), constraints.budgetMax(), constraints.budgetMin(),
+                preferredBrands, constraints.excludedBrands(), constraints.requiredAttributes(),
+                constraints.quantity(), constraints.addressId(), constraints.deliveryBy(), constraints.version());
+        PlanSpec plan = new PlanSpec(PlanSpec.IntentType.PRODUCT_DISCOVERY, withBrands,
+                new PlanSpec.Clarification(false, List.of(), null), PlanSpec.SearchStrategy.HYBRID,
+                List.of(PlanSpec.ReadTask.SEARCH_PRODUCTS), preferences, PlanSpec.FallbackPolicy.safeDefault(), "fixed");
+        return new PlanningModel() {
+            @Override
+            public PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints ignored) {
+                return plan;
+            }
+
+            @Override
+            public PlanSpec replan(String request, PlanSpec.ShoppingConstraints ignored, String reason, int attempt) {
+                return plan;
+            }
+
+            @Override
+            public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints ignored,
+                                              String instruction, List<String> fields) {
+                return plan;
+            }
+        };
+    }
+
     private PlanSpec.ShoppingConstraints constraints() {
         return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), null, List.of(), List.of(),
                 Map.of("memory", "16GB"), 1, "address-1", LocalDate.of(2026, 8, 13), 1);

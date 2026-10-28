@@ -1,6 +1,6 @@
 package com.buyforu.commerce.application;
 
-import com.buyforu.commerce.port.CatalogAttributeNormalizer;
+import com.buyforu.commerce.port.CatalogSearchText;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,10 +20,8 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -92,39 +90,30 @@ public class JdbcCommerceEngine implements CommerceGateway {
         LocalDate deliveryDate = resolveDeliveryDate(request.addressId(), request.userId());
         // 一次搜索只读取一次促销/运费规则，避免候选数量扩大后产生每 SKU 两次查询的 N+1。
         SearchPricing pricing = loadSearchPricing(clock.instant());
-        int fetchLimit = Math.min(200, Math.max(request.limit() * 10, 50));
-        List<ProductCandidate> candidates = jdbc.query("""
-                SELECT p.product_id, s.sku_id, p.name, p.brand, p.attributes::text,
-                       s.unit_price, i.available_quantity
-                FROM commerce_schema.product p
-                JOIN commerce_schema.sku s ON s.product_id = p.product_id
-                JOIN commerce_schema.inventory i ON i.sku_id = s.sku_id
-                WHERE s.status = 'ACTIVE'
-                  AND (? = '' OR lower(p.category) = lower(?))
-                  AND i.available_quantity >= ?
-                ORDER BY s.unit_price
-                LIMIT ?
-                """, (result, row) -> new ProductCandidate(
+        int fetchLimit = Math.min(500, Math.max(request.limit() * 20, 100));
+        List<String> queryTokens = CatalogSearchText.tokens(request.query());
+        List<ProductCandidate> withQuery = queryCandidates(request, queryTokens, fetchLimit, deliveryDate, pricing);
+        boolean queryMatched = queryTokens.isEmpty() || !withQuery.isEmpty();
+        List<ProductCandidate> candidates = queryMatched
+                ? withQuery
+                : queryCandidates(request, List.of(), fetchLimit, deliveryDate, pricing);
+        return new SearchResult(candidates.stream().limit(request.limit()).toList(), clock.instant(), queryMatched);
+    }
+
+    private List<ProductCandidate> queryCandidates(SearchRequest request, List<String> queryTokens, int limit,
+                                                   LocalDate deliveryDate, SearchPricing pricing) {
+        CatalogSearchSql.Query query = CatalogSearchSql.build(request, queryTokens, limit, json);
+        return jdbc.query(query.sql(), (result, row) -> new ProductCandidate(
                         result.getString("product_id"), result.getString("sku_id"), result.getString("name"),
                         result.getString("brand"), readAttributes(result.getString("attributes")),
-                        new Money(result.getBigDecimal("unit_price"), "CNY"),
-                        true, deliveryDate),
-                normalized(request.category()), normalized(request.category()),
-                request.quantity(), fetchLimit).stream()
-                .filter(candidate -> matchesQuery(request.query(), candidate))
-                .filter(candidate -> request.excludedBrands().stream()
-                        .noneMatch(brand -> brand.equalsIgnoreCase(candidate.brand())))
-                .filter(candidate -> CatalogAttributeNormalizer.skuAttributes(request.requiredAttributes())
-                        .entrySet().stream()
-                        .allMatch(entry -> entry.getValue().equalsIgnoreCase(candidate.attributes().get(entry.getKey()))))
+                        new Money(result.getBigDecimal("unit_price"), "CNY"), true, deliveryDate),
+                query.args().toArray()).stream()
                 .filter(candidate -> request.deliveryBy() == null
                         || !candidate.deliveryDate().isAfter(request.deliveryBy()))
                 // 预算比的是应付（含优惠和运费），不是吊牌价，避免满减后该出现的商品被滤掉。
                 .filter(candidate -> matchesBudget(candidate.displayPrice().amount(), request.quantity(),
                         request.budgetMax(), request.budgetMin(), pricing))
-                .limit(request.limit())
                 .toList();
-        return new SearchResult(candidates, clock.instant());
     }
 
     @Override
@@ -637,32 +626,6 @@ public class JdbcCommerceEngine implements CommerceGateway {
     @SuppressWarnings("unchecked")
     private Map<String, String> readAttributes(String value) {
         return json.readValue(value, Map.class);
-    }
-
-    private static String normalized(String value) {
-        return value == null ? "" : value;
-    }
-
-    private static final Set<String> IGNORED_QUERY_TOKENS = Set.of(
-            "以内", "帮我", "一台", "一个", "一下", "可以", "明天", "后天", "送达", "到货");
-
-    // 整句 query 做 LIKE 会搜不到。拆成词，命中名称/品牌/规格任一即可。
-    private static boolean matchesQuery(String query, ProductCandidate candidate) {
-        List<String> tokens = searchTokens(query);
-        if (tokens.isEmpty()) return true;
-        String haystack = (candidate.name() + " " + candidate.brand() + " "
-                + String.join(" ", candidate.attributes().values())).toLowerCase(Locale.ROOT);
-        return tokens.stream().anyMatch(haystack::contains);
-    }
-
-    private static List<String> searchTokens(String query) {
-        if (query == null || query.isBlank()) return List.of();
-        List<String> tokens = new ArrayList<>();
-        for (String raw : query.toLowerCase(Locale.ROOT).split("[^\\p{IsAlphabetic}\\p{IsDigit}]+")) {
-            if (raw.length() < 2 || raw.matches("\\d+") || IGNORED_QUERY_TOKENS.contains(raw)) continue;
-            tokens.add(raw);
-        }
-        return tokens;
     }
 
     private static String budgetKey(Money budgetMax) {

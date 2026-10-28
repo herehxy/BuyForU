@@ -21,8 +21,7 @@ public final class CatalogAttributeNormalizer {
         required.forEach((key, value) -> {
             if (key == null || PLANNING_ONLY.contains(key.toLowerCase(Locale.ROOT))) return;
             String canonical = canonicalKey(key);
-            String normalized = canonical.equals("memory") || canonical.equals("storage")
-                    ? normalizeCapacity(value) : value;
+            String normalized = normalizeValue(canonical, value);
             if (normalized != null && !normalized.isBlank()) sku.put(canonical, value == null ? null : normalized);
         });
         return sku;
@@ -33,14 +32,40 @@ public final class CatalogAttributeNormalizer {
         return switch (k) {
             case "memory", "memorygb", "ram", "ramgb", "内存" -> "memory";
             case "storage", "storagegb", "ssd", "disk", "容量" -> "storage";
+            case "anc", "noisecancellation", "noisecancelling", "active noise cancellation", "降噪", "主动降噪" -> "anc";
+            case "wireless", "wifi", "bluetooth", "无线", "蓝牙" -> "wireless";
             default -> key;
         };
     }
 
+    private static String normalizeValue(String key, String value) {
+        if (value == null || value.isBlank()) return value;
+        if ("anc".equals(key) || "wireless".equals(key)) return normalizeBoolean(value);
+        return switch (key) {
+            case "memory", "storage" -> normalizeCapacity(value);
+            case "layout", "dpi" -> value.replaceAll("[^0-9]", "").isBlank()
+                    ? value.trim() : value.replaceAll("[^0-9]", "");
+            case "refresh" -> value.replaceAll("[^0-9]", "").isBlank()
+                    ? value.trim() : value.replaceAll("[^0-9]", "") + "Hz";
+            default -> value.trim();
+        };
+    }
+
+    private static String normalizeBoolean(String value) {
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (Set.of("yes", "true", "1", "有", "支持", "是", "主动降噪", "支持降噪").contains(normalized)) {
+            return "yes";
+        }
+        if (Set.of("no", "false", "0", "无", "不支持", "否", "不支持降噪").contains(normalized)) {
+            return "no";
+        }
+        return normalized;
+    }
+
     private static String normalizeCapacity(String value) {
         if (value == null || value.isBlank()) return value;
-        String digits = value.replaceAll("[^0-9]", "");
-        if (digits.isEmpty()) return value.trim();
+        String digits = value.replaceAll("[^0-9.]", "").replaceAll("\\.$", "");
+        if (digits.isBlank()) return value.trim();
         String upper = value.toUpperCase(Locale.ROOT);
         String unit = upper.contains("TB") ? "TB" : "GB";
         return digits + unit;

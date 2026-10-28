@@ -89,10 +89,15 @@ public final class CommerceModels {
         }
     }
 
-    public record SearchResult(List<ProductCandidate> candidates, Instant observedAt) {
+    public record SearchResult(List<ProductCandidate> candidates, Instant observedAt, boolean queryMatched) {
         public SearchResult {
             candidates = candidates == null ? List.of() : List.copyOf(candidates);
             observedAt = Objects.requireNonNullElseGet(observedAt, Instant::now);
+        }
+
+        /** Compatibility constructor for callers that do not need query fallback metadata. */
+        public SearchResult(List<ProductCandidate> candidates, Instant observedAt) {
+            this(candidates, observedAt, true);
         }
     }
 

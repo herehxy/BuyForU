@@ -1,6 +1,7 @@
 package com.buyforu.agent.application;
 
 import com.buyforu.agent.domain.PlanSpec;
+import com.buyforu.commerce.port.CatalogVocabulary;
 import com.buyforu.commerce.port.model.CommerceModels.Money;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -294,14 +295,8 @@ public final class SpringAiPlanningModel implements PlanningModel {
         String known = firstPresent(constraints.category(),
                 constraints.requiredAttributes().get("type"), constraints.query(), request);
         if (known == null) return constraints.category();
-        String text = known.toLowerCase();
-        if (text.contains("laptop") || text.contains("notebook") || text.contains("笔记本")
-                || text.contains("轻薄本") || text.contains("游戏本") || text.contains("商务本")
-                || text.contains("电脑")) {
-            return "laptop";
-        }
-        if (text.contains("phone") || text.contains("手机")) return "phone";
-        if (text.contains("headphone") || text.contains("耳机")) return "headphone";
+        String canonical = CatalogVocabulary.category(known);
+        if (canonical != null) return canonical;
         return present(constraints.category()) ? constraints.category() : null;
     }
 
