@@ -6,6 +6,7 @@ import com.buyforu.agent.infrastructure.memory.InMemoryAgentRunStore;
 import com.buyforu.commerce.application.InMemoryCommerceEngine;
 import com.buyforu.commerce.port.CommerceGateway;
 import com.buyforu.commerce.port.model.CommerceModels.*;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -401,6 +403,100 @@ class ShoppingWorkflowServiceTest {
 
         assertEquals("sku-aurora", state.candidateSet().getFirst().skuId(),
                 "用户偏好品牌不能被模型是否输出 BRAND_PREFERENCE 决定");
+    }
+
+    @Test
+    void repairsOneInvalidInitialPlanWithoutRestartingTheRun() {
+        PlanSpec.ShoppingConstraints fixed = constraints();
+        PlanSpec invalid = planWithQuantity(fixed, 0);
+        PlanSpec valid = planWithQuantity(fixed, 1);
+        AtomicInteger repairs = new AtomicInteger();
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        PlanningModel model = repairModel(invalid, request -> {
+            repairs.incrementAndGet();
+            return valid;
+        });
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),
+                model, new InMemoryAgentRunStore(), new InMemoryConversationMemory(), clock, ignored -> false, meters);
+
+        ShoppingAgentState state = workflow.start("repair-once", "user-1", "轻薄本", fixed);
+
+        assertEquals(ShoppingAgentState.Phase.PRESENTING_CANDIDATES, state.phase());
+        assertEquals(1, repairs.get());
+        assertEquals(1.0, meters.counter("buyforu_plan_validation_failed_total",
+                "operation", "create").count());
+        assertEquals(1.0, meters.counter("buyforu_plan_repair_total",
+                "operation", "create", "result", "success").count());
+    }
+
+    @Test
+    void failsWithStableValidationErrorWhenRepairIsAlsoInvalid() {
+        PlanSpec.ShoppingConstraints fixed = constraints();
+        PlanSpec invalid = planWithQuantity(fixed, 0);
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),
+                repairModel(invalid, request -> invalid),
+                new InMemoryAgentRunStore(), new InMemoryConversationMemory(), clock);
+
+        PlanSpecValidationException failure = assertThrows(PlanSpecValidationException.class,
+                () -> workflow.start("repair-fails", "user-1", "轻薄本", fixed));
+
+        assertEquals("PLAN_VALIDATION_FAILED", failure.code());
+    }
+
+    @Test
+    void recordsSearchQueryFallbackMetric() {
+        PlanSpec.ShoppingConstraints base = constraints();
+        PlanSpec.ShoppingConstraints fixed = new PlanSpec.ShoppingConstraints(
+                "通勤", base.category(), base.budgetMax(), base.budgetMin(), base.preferredBrands(),
+                base.excludedBrands(), base.requiredAttributes(), base.quantity(), base.addressId(),
+                base.deliveryBy(), base.version());
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        ShoppingWorkflowService workflow = new ShoppingWorkflowService(InMemoryCommerceEngine.seeded(clock),
+                fixedPlanModel(fixed, List.of(), List.of()), new InMemoryAgentRunStore(),
+                new InMemoryConversationMemory(), clock, ignored -> false, meters);
+
+        ShoppingAgentState state = workflow.start("query-fallback", "user-1", "通勤", fixed);
+
+        assertFalse(state.candidateSet().isEmpty());
+        assertEquals(1.0, meters.counter("buyforu_search_query_unmatched_total").count());
+    }
+
+    private static PlanningModel repairModel(PlanSpec initial, java.util.function.Function<String, PlanSpec> repair) {
+        return new PlanningModel() {
+            @Override
+            public PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints constraints) {
+                return initial;
+            }
+
+            @Override
+            public PlanSpec repairPlan(String request, PlanSpec.ShoppingConstraints constraints,
+                                       PlanSpec rejectedPlan, String validationError) {
+                return repair.apply(validationError);
+            }
+
+            @Override
+            public PlanSpec replan(String request, PlanSpec.ShoppingConstraints constraints,
+                                   String failureReason, int attempt) {
+                return initial;
+            }
+
+            @Override
+            public PlanSpec relaxConstraints(String request, PlanSpec.ShoppingConstraints constraints,
+                                              String instruction, List<String> fields) {
+                return initial;
+            }
+        };
+    }
+
+    private static PlanSpec planWithQuantity(PlanSpec.ShoppingConstraints constraints, int quantity) {
+        PlanSpec.ShoppingConstraints changed = new PlanSpec.ShoppingConstraints(
+                constraints.query(), constraints.category(), constraints.budgetMax(), constraints.budgetMin(),
+                constraints.preferredBrands(), constraints.excludedBrands(), constraints.requiredAttributes(),
+                quantity, constraints.addressId(), constraints.deliveryBy(), constraints.version());
+        return new PlanSpec(PlanSpec.IntentType.PRODUCT_DISCOVERY, changed,
+                new PlanSpec.Clarification(false, List.of(), null), PlanSpec.SearchStrategy.HYBRID,
+                List.of(PlanSpec.ReadTask.SEARCH_PRODUCTS), List.of(),
+                PlanSpec.FallbackPolicy.safeDefault(), "repair test");
     }
 
     private static PlanningModel fixedPlanModel(PlanSpec.ShoppingConstraints constraints,

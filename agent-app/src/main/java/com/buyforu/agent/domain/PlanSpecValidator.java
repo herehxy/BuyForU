@@ -12,6 +12,13 @@ import java.util.ArrayList;
 public final class PlanSpecValidator {
     private static final int MAX_READ_TASKS = 4;
     private static final int MAX_LIST_ITEMS = 20;
+    private static final int MAX_QUERY_LENGTH = 500;
+    private static final int MAX_CATEGORY_LENGTH = 64;
+    private static final int MAX_ADDRESS_LENGTH = 128;
+    private static final int MAX_BRAND_LENGTH = 64;
+    private static final int MAX_ATTRIBUTE_LENGTH = 128;
+    private static final int MAX_QUESTION_LENGTH = 500;
+    private static final int MAX_RATIONALE_LENGTH = 2000;
     private static final EnumSet<PlanSpec.ReadTask> ALLOWED = EnumSet.allOf(PlanSpec.ReadTask.class);
     private static final java.util.Set<String> CLARIFIABLE_FIELDS = java.util.Set.of(
             "query", "category", "budgetMax", "budgetMin", "preferredBrands", "excludedBrands",
@@ -39,6 +46,19 @@ public final class PlanSpecValidator {
         if (plan.rankingPreferences().size() > PlanSpec.RankingPreference.values().length) {
             throw new IllegalArgumentException("too many ranking preferences");
         }
+        requireMax(plan.normalizedConstraints().query(), MAX_QUERY_LENGTH, "query");
+        requireMax(plan.normalizedConstraints().category(), MAX_CATEGORY_LENGTH, "category");
+        requireMax(plan.normalizedConstraints().addressId(), MAX_ADDRESS_LENGTH, "addressId");
+        requireMax(plan.clarification().question(), MAX_QUESTION_LENGTH, "clarification.question");
+        requireMax(plan.rationale(), MAX_RATIONALE_LENGTH, "rationale");
+        plan.normalizedConstraints().preferredBrands().forEach(value ->
+                requireMax(value, MAX_BRAND_LENGTH, "preferredBrands"));
+        plan.normalizedConstraints().excludedBrands().forEach(value ->
+                requireMax(value, MAX_BRAND_LENGTH, "excludedBrands"));
+        plan.normalizedConstraints().requiredAttributes().forEach((key, value) -> {
+            requireMax(key, MAX_ATTRIBUTE_LENGTH, "requiredAttributes.key");
+            requireMax(value, MAX_ATTRIBUTE_LENGTH, "requiredAttributes.value");
+        });
 
         List<PlanSpec.ReadTask> tasks = plan.readTasks();
         if (!plan.clarification().required() && !tasks.contains(PlanSpec.ReadTask.SEARCH_PRODUCTS)) {
@@ -103,5 +123,11 @@ public final class PlanSpecValidator {
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static void requireMax(String value, int max, String field) {
+        if (value != null && value.length() > max) {
+            throw new IllegalArgumentException(field + " exceeds " + max + " characters");
+        }
     }
 }

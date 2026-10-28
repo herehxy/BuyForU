@@ -8,6 +8,15 @@ import com.buyforu.agent.domain.PlanSpec;
 public interface PlanningModel {
     PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints constraints);
 
+    /**
+     * 校验失败后的单次修复入口。默认实现重跑初始规划，生产适配器会额外携带
+     * 被拒绝计划和校验错误，让模型只修正结构/约束矛盾。
+     */
+    default PlanSpec repairPlan(String request, PlanSpec.ShoppingConstraints constraints,
+                                PlanSpec rejectedPlan, String validationError) {
+        return createPlan(request, constraints);
+    }
+
     PlanSpec replan(String request, PlanSpec.ShoppingConstraints currentConstraints,
                     String failureReason, int attempt);
 

@@ -33,6 +33,22 @@ class PlanSpecValidatorTest {
         assertThrows(IllegalArgumentException.class, () -> new PlanSpecValidator().validate(unsafe));
     }
 
+    @Test
+    void rejectsOversizedModelGeneratedText() {
+        PlanSpec safe = new DeterministicPlanningModel().createPlan("laptop", constraints());
+        PlanSpec oversizedQuery = new PlanSpec(safe.intentType(),
+                new PlanSpec.ShoppingConstraints("x".repeat(501), safe.normalizedConstraints().category(),
+                        safe.normalizedConstraints().budgetMax(), safe.normalizedConstraints().budgetMin(),
+                        safe.normalizedConstraints().preferredBrands(), safe.normalizedConstraints().excludedBrands(),
+                        safe.normalizedConstraints().requiredAttributes(), safe.normalizedConstraints().quantity(),
+                        safe.normalizedConstraints().addressId(), safe.normalizedConstraints().deliveryBy(),
+                        safe.normalizedConstraints().version()),
+                safe.clarification(), safe.searchStrategy(), safe.readTasks(), safe.rankingPreferences(),
+                safe.fallbackPolicy(), safe.rationale());
+
+        assertThrows(IllegalArgumentException.class, () -> new PlanSpecValidator().validate(oversizedQuery));
+    }
+
     private PlanSpec.ShoppingConstraints constraints() {
         return new PlanSpec.ShoppingConstraints("", "laptop", Money.cny("5000"), null, List.of(),
                 List.of("Excluded"), Map.of("memory", "16GB"), 1, "addr-1",

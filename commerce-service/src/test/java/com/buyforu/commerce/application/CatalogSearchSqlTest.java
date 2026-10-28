@@ -21,6 +21,7 @@ class CatalogSearchSqlTest {
         assertTrue(query.sql().contains("p.attributes @>"));
         assertTrue(query.sql().contains("<> ALL"));
         assertTrue(query.sql().contains("unnest"));
+        assertTrue(query.sql().contains("terms(token)"));
         assertTrue(query.sql().indexOf("unnest") < query.sql().indexOf("LIMIT"));
     }
 }

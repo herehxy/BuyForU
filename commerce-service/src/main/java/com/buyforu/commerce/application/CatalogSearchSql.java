@@ -55,7 +55,7 @@ final class CatalogSearchSql {
             sql.append("""
                       AND EXISTS (
                           SELECT 1
-                          FROM unnest(CAST(? AS text[])) AS token
+                          FROM unnest(CAST(? AS text[])) AS terms(token)
                           WHERE lower(concat_ws(' ', p.name, p.brand, p.category, p.attributes::text))
                                 LIKE '%' || lower(token) || '%'
                       )

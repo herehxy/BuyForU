@@ -395,6 +395,7 @@ public class CommandWorker {
         if (commerce != null) return commerce.code();
         if (causeNameContains(failure, "McpContract")) return "MCP_CONTRACT_MISMATCH";
         if (causeNameContains(failure, "McpInfrastructure")) return "COMMERCE_UNAVAILABLE";
+        if (causeNameContains(failure, "PlanSpecValidation")) return "PLAN_VALIDATION_FAILED";
         if (causeNameContains(failure, "CallNotPermitted")) return "DEPENDENCY_CIRCUIT_OPEN";
         // 中断判定必须早于 Timeout：DependencyInterruptedException 语义是"被终止"，
         // 若先判 Timeout 会把期限届满终止误报成外部服务超时。
@@ -411,6 +412,7 @@ public class CommandWorker {
             case "DEPENDENCY_TIMEOUT" -> "外部服务响应超时，系统将按安全规则处理";
             case "DEPENDENCY_CIRCUIT_OPEN", "COMMERCE_UNAVAILABLE" -> "交易服务暂时不可用，请稍后重试";
             case "MCP_CONTRACT_MISMATCH" -> "Agent 与交易服务版本不兼容，请联系维护人员";
+            case "PLAN_VALIDATION_FAILED" -> "购物需求解析失败，请重新提交";
             case "STALE_EXECUTION" -> "任务已由更新的执行实例接管";
             case "COMMAND_DEADLINE_EXCEEDED" -> "任务处理超时，请稍后重试";
             default -> "任务执行失败，请使用错误码和 requestId 排查";

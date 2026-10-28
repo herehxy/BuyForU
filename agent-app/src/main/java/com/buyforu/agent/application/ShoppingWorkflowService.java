@@ -12,6 +12,8 @@ import com.buyforu.commerce.port.model.CommerceModels.*;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -41,27 +43,37 @@ public class ShoppingWorkflowService {
     private final Clock clock;
     private final ConversationMemory memory;
     private final RunExecutionGuard executionGuard;
+    private final MeterRegistry meters;
 
     @Autowired
     public ShoppingWorkflowService(CommerceGateway commerce, PlanningModel planningModel, AgentRunStore store,
-                                   ConversationMemory memory, ObjectProvider<RunExecutionGuard> executionGuard) {
+                                   ConversationMemory memory, ObjectProvider<RunExecutionGuard> executionGuard,
+                                   ObjectProvider<MeterRegistry> meters) {
         this(commerce, planningModel, store, memory, Clock.systemUTC(),
-                executionGuard.getIfAvailable(() -> ignored -> false));
+                executionGuard.getIfAvailable(() -> ignored -> false),
+                meters.getIfAvailable(SimpleMeterRegistry::new));
     }
 
     ShoppingWorkflowService(CommerceGateway commerce, PlanningModel planningModel, AgentRunStore store,
                             ConversationMemory memory, Clock clock) {
-        this(commerce, planningModel, store, memory, clock, ignored -> false);
+        this(commerce, planningModel, store, memory, clock, ignored -> false, new SimpleMeterRegistry());
     }
 
     ShoppingWorkflowService(CommerceGateway commerce, PlanningModel planningModel, AgentRunStore store,
                             ConversationMemory memory, Clock clock, RunExecutionGuard executionGuard) {
+        this(commerce, planningModel, store, memory, clock, executionGuard, new SimpleMeterRegistry());
+    }
+
+    ShoppingWorkflowService(CommerceGateway commerce, PlanningModel planningModel, AgentRunStore store,
+                            ConversationMemory memory, Clock clock, RunExecutionGuard executionGuard,
+                            MeterRegistry meters) {
         this.commerce = commerce;
         this.planningModel = planningModel;
         this.store = store;
         this.clock = clock;
         this.memory = memory;
         this.executionGuard = executionGuard == null ? ignored -> false : executionGuard;
+        this.meters = meters == null ? new SimpleMeterRegistry() : meters;
     }
 
     // ===== 规划与任务读取 =====================================================
@@ -104,7 +116,8 @@ public class ShoppingWorkflowService {
                                                  PlanSpec.ShoppingConstraints constraints) {
         String contextualRequest = contextualRequest(memory.recentUserMessages(
                 pending.conversationId(), pending.userId(), 8));
-        PlanSpec plan = planValidator.validate(planningModel.createPlan(contextualRequest, constraints));
+        PlanSpec plan = validateWithRepair(contextualRequest, constraints,
+                planningModel.createPlan(contextualRequest, constraints), "create");
         Phase phase = plan.clarification().required() ? Phase.NEEDS_CLARIFICATION : Phase.SEARCHING;
         return store.save(new ShoppingAgentState(pending.runId(), pending.conversationId(), pending.userId(),
                 pending.traceId(), pending.originalRequest(), plan, phase, List.of(), -1, null, null, null,
@@ -148,9 +161,9 @@ public class ShoppingWorkflowService {
             throw new RunStateConflictException("run is not waiting for clarification");
         }
         memory.appendUserMessage(state.conversationId(), userId, message);
-        PlanSpec plan = planValidator.validate(planningModel.createPlan(
-                contextualRequest(memory.recentUserMessages(state.conversationId(), userId, 8)),
-                state.planSpec().normalizedConstraints()));
+        String contextualRequest = contextualRequest(memory.recentUserMessages(state.conversationId(), userId, 8));
+        PlanSpec plan = validateWithRepair(contextualRequest, state.planSpec().normalizedConstraints(),
+                planningModel.createPlan(contextualRequest, state.planSpec().normalizedConstraints()), "clarify");
         Phase phase = plan.clarification().required() ? Phase.NEEDS_CLARIFICATION : Phase.SEARCHING;
         ShoppingAgentState clarified = new ShoppingAgentState(state.runId(), state.conversationId(),
                 state.userId(), state.traceId(), state.originalRequest(), plan, phase,
@@ -360,8 +373,12 @@ public class ShoppingWorkflowService {
         SearchResult result = commerce.searchProducts(new SearchRequest(state.userId(), c.query(), c.category(),
                 c.budgetMax(), c.budgetMin(),
                 c.excludedBrands(), c.requiredAttributes(), c.addressId(), c.deliveryBy(), c.quantity(), 10));
+        if (!result.queryMatched()) {
+            meters.counter("buyforu_search_query_unmatched_total").increment();
+        }
         List<ProductCandidate> rankedCandidates = rankCandidates(result.candidates(), state.planSpec());
         if (rankedCandidates.isEmpty()) {
+            meters.counter("buyforu_search_empty_total").increment();
             ReplanController.ReplanDecision decision = replanController.decide(state);
             if (decision.level() == ReplanController.ReplanLevel.SEARCH_REPLAN) {
                 return replanAndSearch(state, "no catalog candidate satisfied all hard constraints");
@@ -481,8 +498,9 @@ public class ShoppingWorkflowService {
     private ShoppingAgentState replanAndSearch(ShoppingAgentState state, String reason) {
         // Search Replan 允许修改搜索表达和策略，但 PlanningModel 必须保留全部硬约束。
         int nextAttempt = state.searchReplanCount() + 1;
-        PlanSpec replanned = planValidator.validate(planningModel.replan(state.originalRequest(),
-                state.planSpec().normalizedConstraints(), reason, nextAttempt));
+        PlanSpec replanned = validateWithRepair(state.originalRequest(), state.planSpec().normalizedConstraints(),
+                planningModel.replan(state.originalRequest(), state.planSpec().normalizedConstraints(), reason,
+                        nextAttempt), "replan");
         ShoppingAgentState replanning = new ShoppingAgentState(state.runId(), state.conversationId(),
                 state.userId(), state.traceId(), state.originalRequest(), replanned, Phase.SEARCHING,
                 List.of(), -1, null, null, null, state.candidateFallbackCount(), nextAttempt,
@@ -575,6 +593,25 @@ public class ShoppingWorkflowService {
 
     private static void assertOwner(ShoppingAgentState state, String userId) {
         if (!state.userId().equals(userId)) throw new SecurityException("run belongs to another user");
+    }
+
+    private PlanSpec validateWithRepair(String request, PlanSpec.ShoppingConstraints constraints,
+                                        PlanSpec proposed, String operation) {
+        try {
+            return planValidator.validate(proposed);
+        } catch (IllegalArgumentException rejected) {
+            meters.counter("buyforu_plan_validation_failed_total", "operation", operation).increment();
+            try {
+                PlanSpec repaired = planningModel.repairPlan(request, constraints, proposed, rejected.getMessage());
+                PlanSpec validated = planValidator.validate(repaired);
+                meters.counter("buyforu_plan_repair_total", "operation", operation, "result", "success").increment();
+                return validated;
+            } catch (RuntimeException repairFailure) {
+                meters.counter("buyforu_plan_repair_total", "operation", operation, "result", "failure").increment();
+                throw new PlanSpecValidationException("planning model produced an invalid plan after repair",
+                        repairFailure);
+            }
+        }
     }
 
     private ShoppingAgentState copy(ShoppingAgentState s, Phase phase, int selectedIndex,

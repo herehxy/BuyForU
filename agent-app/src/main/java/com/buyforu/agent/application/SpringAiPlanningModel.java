@@ -3,11 +3,21 @@ package com.buyforu.agent.application;
 import com.buyforu.agent.domain.PlanSpec;
 import com.buyforu.commerce.port.CatalogVocabulary;
 import com.buyforu.commerce.port.model.CommerceModels.Money;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.ResponseEntity;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.Clock;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.time.Duration;
@@ -47,9 +57,25 @@ public final class SpringAiPlanningModel implements PlanningModel {
     private final ObjectMapper json;
     private final KnowledgeRetriever knowledge;
     private final DependencyExecutor dependencies;
+    private final Clock clock;
+    private final ZoneId zoneId;
+    private final PlanningCallMetrics metrics;
 
     public SpringAiPlanningModel(ChatClient.Builder builder, ObjectMapper json, KnowledgeRetriever knowledge,
                                  DependencyExecutor dependencies) {
+        this(builder, json, knowledge, dependencies, new SimpleMeterRegistry(),
+                Clock.systemUTC(), ZoneId.of("Asia/Shanghai"));
+    }
+
+    @Autowired
+    public SpringAiPlanningModel(ChatClient.Builder builder, ObjectMapper json, KnowledgeRetriever knowledge,
+                                 DependencyExecutor dependencies, MeterRegistry meters,
+                                 @Value("${buyforu.planning.zone-id:Asia/Shanghai}") String zoneId) {
+        this(builder, json, knowledge, dependencies, meters, Clock.systemUTC(), ZoneId.of(zoneId));
+    }
+
+    SpringAiPlanningModel(ChatClient.Builder builder, ObjectMapper json, KnowledgeRetriever knowledge,
+                          DependencyExecutor dependencies, MeterRegistry meters, Clock clock, ZoneId zoneId) {
         // V4 默认 thinking=high，会先吐很长推理再给 PlanSpec，45 秒硬超时几乎必炸。
         // 规划只要结构化 JSON，关掉 thinking。
         this.chatClient = builder.defaultSystem(SYSTEM_PROMPT)
@@ -60,11 +86,33 @@ public final class SpringAiPlanningModel implements PlanningModel {
         this.json = json;
         this.knowledge = knowledge;
         this.dependencies = dependencies;
+        this.clock = clock;
+        this.zoneId = zoneId;
+        this.metrics = new PlanningCallMetrics(meters == null ? new SimpleMeterRegistry() : meters);
     }
 
     @Override
     public PlanSpec createPlan(String request, PlanSpec.ShoppingConstraints explicitConstraints) {
-        return plan(request, explicitConstraints, null, 0);
+        return plan(request, explicitConstraints, null, 0, "create");
+    }
+
+    @Override
+    public PlanSpec repairPlan(String request, PlanSpec.ShoppingConstraints constraints,
+                               PlanSpec rejectedPlan, String validationError) {
+        String repairRequest = """
+                Original user request:
+                %s
+
+                Previous PlanSpec rejected by the application:
+                %s
+
+                Validation error:
+                %s
+
+                Return one corrected PlanSpec. Keep trusted application constraints unchanged and do not
+                invent new user requirements. The correction must be executable under the same shopping graph.
+                """.formatted(request, json.writeValueAsString(rejectedPlan), validationError);
+        return plan(repairRequest, constraints, null, 0, "repair");
     }
 
     @Override
@@ -72,7 +120,7 @@ public final class SpringAiPlanningModel implements PlanningModel {
                            String failureReason, int attempt) {
         if (attempt < 1 || attempt > 2) throw new IllegalArgumentException("replan attempt must be 1 or 2");
         PlanSpec proposed = plan(request + "\nCurrent immutable hard constraints: "
-                + json.writeValueAsString(currentConstraints), null, failureReason, attempt);
+                + json.writeValueAsString(currentConstraints), null, failureReason, attempt, "replan");
         if (proposed.clarification().required() || !proposed.readTasks().contains(PlanSpec.ReadTask.SEARCH_PRODUCTS)) {
             throw new IllegalStateException("search replan must remain executable without new clarification");
         }
@@ -118,7 +166,7 @@ public final class SpringAiPlanningModel implements PlanningModel {
                 """.formatted(request, json.writeValueAsString(currentConstraints),
                 json.writeValueAsString(fields), explicitUserInstruction);
         // 这不是 search replan，因此 failure 必须为 null；否则通用 searchFailure 指令会要求硬约束完全不变。
-        PlanSpec proposed = requestPlan(relaxationRequest, currentConstraints, null, 0);
+        PlanSpec proposed = requestPlan(relaxationRequest, currentConstraints, null, 0, "relax");
         return applyApprovedRelaxation(proposed, currentConstraints, fields, request);
     }
 
@@ -163,14 +211,14 @@ public final class SpringAiPlanningModel implements PlanningModel {
     }
 
     private PlanSpec plan(String request, PlanSpec.ShoppingConstraints explicitConstraints,
-                          String failureReason, int attempt) {
-        PlanSpec filled = requestPlan(request, explicitConstraints, failureReason, attempt);
+                          String failureReason, int attempt, String operation) {
+        PlanSpec filled = requestPlan(request, explicitConstraints, failureReason, attempt, operation);
         return explicitConstraints == null ? filled : enforceExplicitConstraints(filled, explicitConstraints);
     }
 
     /** 执行一次结构化模型调用，但不在这里决定哪些字段有权覆盖应用传入的约束。 */
     private PlanSpec requestPlan(String request, PlanSpec.ShoppingConstraints contextConstraints,
-                                 String failureReason, int attempt) {
+                                 String failureReason, int attempt, String operation) {
         String constraints = contextConstraints == null ? "null" : json.writeValueAsString(contextConstraints);
         // 阈值由 eval/rag/golden-set.json 标定，不是拍脑袋的常数：当前嵌入模型（embeddinggemma）
         // 加整篇切块，相似度天花板约 0.62，原先的 0.65 不可达 —— retrieve() 会对任何查询都返回空，
@@ -178,13 +226,19 @@ public final class SpringAiPlanningModel implements PlanningModel {
         // [0.515, 0.535]，取上界偏向精确率：召回错误的政策数字比不召回更危险。
         // 改这里必须同步改金标集，RagRetrievalEvalTest 会校验两处一致。
         List<KnowledgeRetriever.KnowledgeHit> evidence = knowledge.retrieve(request, 5, 0.53);
+        metrics.retrieval(!evidence.isEmpty());
         String knowledgeContext = evidence.isEmpty() ? "[]" : json.writeValueAsString(evidence);
         // 不要 validateSchema：模型常把可选字段写成 null，Spring AI 会连着重试，按钮一直转圈。
-        PlanSpec plan = dependencies.call(DependencyExecutor.Dependency.DEEPSEEK, Duration.ofSeconds(45), 2,
-                () -> chatClient.prompt()
-                .user(user -> user.text("""
+        try {
+            ResponseEntity<ChatResponse, PlanSpec> response = dependencies.call(
+                    DependencyExecutor.Dependency.DEEPSEEK, Duration.ofSeconds(45), 2,
+                    () -> chatClient.prompt()
+                    .user(user -> user.text("""
                                 userRequest:
                                 {request}
+
+                                currentDateTime (authoritative time anchor for relative dates):
+                                {now}
 
                                 explicitConstraints (trusted values supplied by the application, or null):
                                 {constraints}
@@ -202,14 +256,29 @@ public final class SpringAiPlanningModel implements PlanningModel {
                                 search wording/strategy/read tasks. Increment normalizedConstraints.version.
                                 """)
                         .param("request", request)
+                        .param("now", planningTimestamp(clock, zoneId))
                         .param("constraints", constraints)
                         .param("knowledge", knowledgeContext)
                         .param("failure", failureReason == null ? "null" : failureReason)
                         .param("attempt", attempt))
-                .call()
-                .entity(PlanSpec.class));
-        if (plan == null) throw new IllegalStateException("planning model returned no PlanSpec");
-        return correctBudgetDirection(fillInferredCategory(plan, request), request);
+                    .call()
+                    .responseEntity(PlanSpec.class));
+            if (response == null || response.entity() == null) {
+                throw new IllegalStateException("planning model returned no PlanSpec");
+            }
+            Usage usage = response.response().getMetadata() == null ? null
+                    : response.response().getMetadata().getUsage();
+            metrics.request(operation, "success");
+            metrics.usage(operation, usage);
+            return correctBudgetDirection(fillInferredCategory(response.entity(), request), request);
+        } catch (RuntimeException failure) {
+            metrics.request(operation, "failure");
+            throw failure;
+        }
+    }
+
+    static String planningTimestamp(Clock clock, ZoneId zoneId) {
+        return OffsetDateTime.ofInstant(clock.instant(), zoneId).toString();
     }
 
     private PlanSpec enforceExplicitConstraints(PlanSpec plan, PlanSpec.ShoppingConstraints explicit) {

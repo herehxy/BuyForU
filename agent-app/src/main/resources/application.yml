@@ -72,6 +72,9 @@ buyforu:
     trusted-proxies: ${TRUSTED_PROXY_ADDRESSES:}
   mcp:
     service-token: ${COMMERCE_MCP_SERVICE_TOKEN}
+  planning:
+    # 相对日期（明天/本周内）统一使用这个时区解析；模型只接收时间锚点，不自行猜日期。
+    zone-id: ${AGENT_PLANNING_ZONE:Asia/Shanghai}
   concurrency:
     instance-id: ${AGENT_INSTANCE_ID:${spring.application.name}-${random.uuid}}
     lease-duration: ${AGENT_LEASE_DURATION:30s}

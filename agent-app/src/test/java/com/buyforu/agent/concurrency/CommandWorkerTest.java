@@ -1,6 +1,7 @@
 package com.buyforu.agent.concurrency;
 
 import com.buyforu.commerce.port.CommerceOperationException;
+import com.buyforu.agent.application.PlanSpecValidationException;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -109,6 +110,12 @@ class CommandWorkerTest {
             assertEquals("OUT_OF_STOCK", CommandWorker.classify(
                     new RuntimeException(new CommerceOperationException("OUT_OF_STOCK", "gone"))));
             assertEquals("COMMAND_EXECUTION_FAILED", CommandWorker.classify(new IllegalStateException("other")));
+        }
+
+        @Test
+        void classifiesInvalidPlanAfterRepair() {
+            assertEquals("PLAN_VALIDATION_FAILED", CommandWorker.classify(
+                    new PlanSpecValidationException("invalid", new IllegalArgumentException("bad plan"))));
         }
     }
 

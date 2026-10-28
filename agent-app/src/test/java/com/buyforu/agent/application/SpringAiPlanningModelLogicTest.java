@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.time.Clock;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -16,6 +19,14 @@ import static org.junit.jupiter.api.Assertions.*;
  * 测试预算方向纠正、品类推断和约束放宽合并规则。
  */
 class SpringAiPlanningModelLogicTest {
+
+    @Test
+    void formatsPlanningTimestampInConfiguredZone() {
+        Clock clock = Clock.fixed(java.time.Instant.parse("2026-08-12T08:00:00Z"), ZoneOffset.UTC);
+
+        assertEquals("2026-08-12T16:00+08:00",
+                SpringAiPlanningModel.planningTimestamp(clock, ZoneId.of("Asia/Shanghai")));
+    }
 
     // ===== correctBudgetDirection =====
 
