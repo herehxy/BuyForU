@@ -25,6 +25,9 @@ BuyForU 是一个以真实交易约束为边界的电商购物 Agent。Agent 负
 - 生产 JAR 不包含任何 InMemory Commerce/Agent Store。内存实现仅存在于 test-jar。
 - Actuator 提供健康探针和 Prometheus 指标；API 错误与响应头包含请求关联编号。
 - Redis Lua Token Bucket 在所有 Agent 实例间统一限流；用户级虚拟时间队列保证高频用户不能垄断执行槽。
+- 调度器每个周期按额度批量填充 Planning/Transaction Worker，CONTROL 命令优先派发；瞬时失败的取消命令可从 `RETRY_WAIT` 再次执行。
+- 商品搜索把中文口语句拆成可匹配词项，query 作为相关性信号并带硬约束回退；SQL 过滤发生在 LIMIT 之前。
+- 规划模型输出会做长度和业务不变量校验，失败时在同一命令内做一次受控修复；时间锚点、模型 token 和检索命中写入指标。
 - 写 API 使用 `202 Accepted` 持久化命令；Worker 用 30 秒短租约和 execution epoch 推进固定图，LLM/MCP 等待期间不持有数据库连接。
 - DeepSeek、MCP 读、MCP 写和 Ollama 分别使用虚拟线程执行器、零等待 Bulkhead、硬超时与独立熔断器。
 - 运行事件先写 PostgreSQL，再由 Redis Pub/Sub 唤醒 SSE；浏览器断线后可回放或轮询恢复。
@@ -142,6 +145,6 @@ chmod +x scripts/accept.sh
 
 压测脚本在 `scripts/k6/`，需要本机已起服务并准备好 JWT，不进 CI 必过路径。
 
-测试覆盖固定图真实节点与两次人工恢复、完整选择/预占/审批/下单、订单副作用后的崩溃恢复、库存并发不超卖、effect 冲突、用户隔离、结构化计划安全校验和 pgvector chunk 边界。完整外部验收还要求 Docker 服务正常且 DeepSeek Key 可调用。
+测试覆盖固定图真实节点与两次人工恢复、完整选择/预占/审批/下单、订单副作用后的崩溃恢复、库存并发不超卖、effect 冲突、用户隔离、结构化计划安全校验与一次修复、中文搜索词归一化、查询回退排序和 pgvector chunk 边界。完整外部验收还要求 Docker 服务正常且 DeepSeek Key 可调用。
 
 本地采用 PostgreSQL 而不是 MySQL，是因为本项目同时依赖关系事务、行锁、advisory lock、JSONB 和 pgvector；将交易状态、LangGraph checkpoint 与向量知识放在同一个可事务运维的数据平台，能减少当前规模下不必要的中间件。若未来交易主库必须接入既有 MySQL，`CommerceGateway` 边界允许替换 Commerce 持久化，而 Agent 的 pgvector/checkpoint 仍可独立保留在 PostgreSQL。
