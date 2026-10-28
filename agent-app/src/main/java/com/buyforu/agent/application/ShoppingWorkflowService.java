@@ -371,10 +371,14 @@ public class ShoppingWorkflowService {
     private ShoppingAgentState executeSearch(ShoppingAgentState state) {
         // 搜索只传递用户硬约束；Commerce 会按当前库存数量、价格和履约能力重新筛选。
         PlanSpec.ShoppingConstraints c = state.planSpec().normalizedConstraints();
+        List<String> excludedTerms = java.util.stream.Stream.concat(
+                        CatalogSearchText.excludedTerms(state.originalRequest()).stream(),
+                        CatalogSearchText.excludedTerms(c.query()).stream())
+                .distinct().toList();
         SearchResult result = commerce.searchProducts(new SearchRequest(state.userId(), c.query(), c.category(),
                 c.budgetMax(), c.budgetMin(),
                 c.excludedBrands(), c.requiredAttributes(), c.addressId(), c.deliveryBy(), c.quantity(), 10,
-                CatalogSearchText.excludedTerms(state.originalRequest())));
+                excludedTerms));
         if (!result.queryMatched()) {
             meters.counter("buyforu_search_query_unmatched_total").increment();
         }

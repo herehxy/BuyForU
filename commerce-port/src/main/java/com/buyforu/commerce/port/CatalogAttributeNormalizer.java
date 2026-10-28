@@ -32,7 +32,7 @@ public final class CatalogAttributeNormalizer {
         return switch (k) {
             case "memory", "memorygb", "ram", "ramgb", "内存" -> "memory";
             case "storage", "storagegb", "ssd", "disk", "容量" -> "storage";
-            case "anc", "noisecancellation", "noisecancelling", "active noise cancellation", "降噪", "主动降噪" -> "anc";
+            case "anc", "noisecancellation", "noisecancelling", "activenoisecancellation", "降噪", "主动降噪" -> "anc";
             case "wireless", "wifi", "bluetooth", "无线", "蓝牙" -> "wireless";
             default -> key;
         };
