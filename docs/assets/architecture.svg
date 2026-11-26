@@ -1,0 +1,268 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1120" viewBox="0 0 1680 1120" role="img" aria-label="BuyForU 系统架构图">
+  <defs>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; fill: #1e293b; }
+      .title { font-size: 28px; font-weight: 700; fill: #0f172a; }
+      .subtitle { font-size: 14px; fill: #64748b; }
+      .meta { font-size: 12px; fill: #94a3b8; }
+      .section { font-size: 18px; font-weight: 700; }
+      .box-title { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .line { font-size: 12px; fill: #334155; }
+      .small { font-size: 11px; fill: #475569; }
+      .tiny { font-size: 10.5px; fill: #64748b; }
+      .edge-label { font-size: 11px; fill: #475569; }
+      .node-title { font-size: 12.5px; font-weight: 700; fill: #1e1b4b; }
+      .node-sub { font-size: 10.5px; fill: #6366f1; }
+      .accent-agent { fill: #6366f1; }
+      .accent-commerce { fill: #0d9488; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-dashed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.07"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1680" height="1120" fill="#f7f8fc"/>
+
+  <!-- Header -->
+  <text class="title" x="48" y="56">BuyForU 系统架构图</text>
+  <text class="subtitle" x="48" y="84">Agent 负责理解、规划与推荐；金额、库存、履约与订单只由 Commerce 决定</text>
+  <text class="meta" x="1632" y="52" text-anchor="end">Java 21 · Spring Boot 4.1 · Spring AI 2.0 · LangGraph4j 1.8</text>
+  <text class="meta" x="1632" y="72" text-anchor="end">PostgreSQL 17 + pgvector · Redis 7.4 · Keycloak 26.3 · React 19</text>
+
+  <!-- ======================= Web / Keycloak ======================= -->
+  <rect x="48" y="130" width="252" height="130" rx="14" fill="#fff7ed" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="48" y="130" width="252" height="6" rx="3" fill="#f59e0b"/>
+  <text class="box-title" x="68" y="164">Keycloak 26.3 · 8082</text>
+  <text class="small" x="68" y="188">OIDC Authorization Code + PKCE</text>
+  <text class="small" x="68" y="208">JWT 签发 · JWKS 校验端点</text>
+  <text class="small" x="68" y="228">realm role：knowledge-admin</text>
+  <text class="small" x="68" y="248">本地不预置用户密码</text>
+
+  <rect x="48" y="300" width="252" height="340" rx="14" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="48" y="300" width="252" height="6" rx="3" fill="#8b5cf6"/>
+  <text class="box-title" x="68" y="334">Web · React 19 + TS</text>
+  <text class="tiny" x="68" y="354">Vite 7 · 端口 5173</text>
+  <text class="small" x="68" y="384">商品陈列 + AI 导购面板</text>
+  <text class="small" x="68" y="406">自然语言需求 · 候选选择</text>
+  <text class="small" x="68" y="428">确认快照 · 审批 / 取消</text>
+  <text class="small" x="68" y="466">TanStack Query</text>
+  <text class="small" x="68" y="488">oidc-client-ts</text>
+  <text class="small" x="68" y="526">刷新后按 JWT 恢复</text>
+  <text class="small" x="68" y="548">地址 / 最近任务 / 待审批</text>
+  <text class="small" x="68" y="586">SSE 断线续传</text>
+  <text class="small" x="68" y="608">fetch 流，不把 Token 放 URL</text>
+
+  <!-- ======================= Agent ======================= -->
+  <rect x="360" y="130" width="580" height="690" rx="18" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="360" y="130" width="580" height="8" rx="4" fill="#6366f1"/>
+  <text class="section" x="384" y="168" fill="#3730a3">agent-app</text>
+  <text class="meta" x="500" y="168">Spring Boot · 端口 8080</text>
+
+  <!-- API -->
+  <rect x="384" y="184" width="532" height="88" rx="12" fill="#ffffff" stroke="#c7d2fe"/>
+  <text class="box-title" x="402" y="210">接入层</text>
+  <text class="small" x="402" y="234">REST API · JWT 所有权校验 · Idempotency-Key</text>
+  <text class="small" x="402" y="256">写接口 202 Accepted · SSE 事件回放</text>
+
+  <!-- Scheduler -->
+  <rect x="384" y="288" width="532" height="88" rx="12" fill="#ffffff" stroke="#c7d2fe"/>
+  <text class="box-title" x="402" y="314">异步命令与公平调度</text>
+  <text class="small" x="402" y="338">PostgreSQL 命令事实 · 30s 短租约 · execution epoch</text>
+  <text class="small" x="402" y="360">Redis Lua Token Bucket · 用户级虚拟时间队列</text>
+
+  <!-- Graph -->
+  <rect x="384" y="392" width="532" height="270" rx="12" fill="#ffffff" stroke="#c7d2fe"/>
+  <text class="box-title" x="402" y="418">LangGraph4j 固定购物图</text>
+  <text class="tiny" x="402" y="438">LLM 只产出 PlanSpec，不能改拓扑，也不能跳过人工确认点</text>
+
+  <rect x="402" y="456" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="477" y="479" text-anchor="middle">① 规划</text>
+  <text class="node-sub" x="477" y="497" text-anchor="middle">PlanSpec + 校验</text>
+
+  <rect x="575" y="456" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="650" y="479" text-anchor="middle">② 检索</text>
+  <text class="node-sub" x="650" y="497" text-anchor="middle">pgvector + 商品搜索</text>
+
+  <rect x="748" y="456" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="823" y="479" text-anchor="middle">③ 候选</text>
+  <text class="node-sub" x="823" y="497" text-anchor="middle">用户选择 SKU</text>
+
+  <rect x="748" y="536" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="823" y="559" text-anchor="middle">④ 预占</text>
+  <text class="node-sub" x="823" y="577" text-anchor="middle">报价 + 库存锁定</text>
+
+  <rect x="575" y="536" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="650" y="559" text-anchor="middle">⑤ 审批</text>
+  <text class="node-sub" x="650" y="577" text-anchor="middle">快照 + summaryHash</text>
+
+  <rect x="402" y="536" width="150" height="54" rx="10" fill="#eef2ff" stroke="#818cf8"/>
+  <text class="node-title" x="477" y="559" text-anchor="middle">⑥ 下单</text>
+  <text class="node-sub" x="477" y="577" text-anchor="middle">幂等 effect ledger</text>
+
+  <line x1="552" y1="483" x2="573" y2="483" stroke="#818cf8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="725" y1="483" x2="746" y2="483" stroke="#818cf8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="823" y1="510" x2="823" y2="534" stroke="#818cf8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="748" y1="563" x2="727" y2="563" stroke="#818cf8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="575" y1="563" x2="554" y2="563" stroke="#818cf8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <text class="tiny" x="402" y="620">无结果 → 最多 2 次 Search Replan</text>
+  <text class="tiny" x="402" y="640">硬条件无解 → 用户明确批准后才放宽</text>
+  <text class="tiny" x="402" y="660">人工等待点：澄清 / 选择 / 审批</text>
+
+  <!-- Adapters -->
+  <rect x="384" y="676" width="256" height="112" rx="12" fill="#ffffff" stroke="#c7d2fe"/>
+  <text class="box-title" x="402" y="702">Spring AI</text>
+  <text class="small" x="402" y="726">DeepSeek Chat · OpenAI 兼容</text>
+  <text class="small" x="402" y="746">结构化 PlanSpec 输出</text>
+  <text class="small" x="402" y="766">长度 + 业务不变量校验</text>
+
+  <rect x="660" y="676" width="256" height="112" rx="12" fill="#ffffff" stroke="#c7d2fe"/>
+  <text class="box-title" x="678" y="702">MCP Client</text>
+  <text class="small" x="678" y="726">CommerceGateway 适配器</text>
+  <text class="small" x="678" y="746">Streamable HTTP</text>
+  <text class="small" x="678" y="766">虚拟线程 · 熔断 · 硬超时</text>
+
+  <text class="tiny" x="384" y="810" fill="#4f46e5">依赖 commerce-port：CommerceGateway 契约 + 交易模型（纯 Java）</text>
+
+  <!-- ======================= Commerce ======================= -->
+  <rect x="1140" y="130" width="492" height="690" rx="18" fill="#ecfdf5" stroke="#0d9488" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="1140" y="130" width="492" height="8" rx="4" fill="#0d9488"/>
+  <text class="section" x="1164" y="168" fill="#115e59">commerce-service</text>
+  <text class="meta" x="1372" y="168">Spring Boot · 8081</text>
+
+  <!-- MCP server -->
+  <rect x="1164" y="184" width="444" height="104" rx="12" fill="#ffffff" stroke="#99f6e4"/>
+  <text class="box-title" x="1182" y="210">MCP Server · Streamable HTTP</text>
+  <text class="small" x="1182" y="234">服务凭证校验 · 结构化工具定义</text>
+  <text class="small" x="1182" y="256">searchProducts / quote / reserve / createOrder</text>
+  <text class="small" x="1182" y="276">Agent 拿不到任何直接写库路径</text>
+
+  <!-- Domain -->
+  <rect x="1164" y="304" width="444" height="308" rx="12" fill="#ffffff" stroke="#99f6e4"/>
+  <text class="box-title" x="1182" y="330">交易领域 · 唯一事实源</text>
+
+  <rect x="1182" y="344" width="200" height="66" rx="10" fill="#f0fdfa" stroke="#5eead4"/>
+  <text class="small" x="1196" y="368" fill="#134e4a" font-weight="600">定价与促销</text>
+  <text class="tiny" x="1196" y="388">金额 / 优惠 / 应付</text>
+
+  <rect x="1402" y="344" width="200" height="66" rx="10" fill="#f0fdfa" stroke="#5eead4"/>
+  <text class="small" x="1416" y="368" fill="#134e4a" font-weight="600">运费与履约</text>
+  <text class="tiny" x="1416" y="388">承诺与时效</text>
+
+  <rect x="1182" y="422" width="200" height="66" rx="10" fill="#f0fdfa" stroke="#5eead4"/>
+  <text class="small" x="1196" y="446" fill="#134e4a" font-weight="600">库存预占</text>
+  <text class="tiny" x="1196" y="466">行锁防超卖</text>
+
+  <rect x="1402" y="422" width="200" height="66" rx="10" fill="#f0fdfa" stroke="#5eead4"/>
+  <text class="small" x="1416" y="446" fill="#134e4a" font-weight="600">订单与快照</text>
+  <text class="tiny" x="1416" y="466">绑定用户 / 报价 / 有效期</text>
+
+  <rect x="1182" y="502" width="408" height="46" rx="10" fill="#f0fdfa" stroke="#5eead4"/>
+  <text class="small" x="1196" y="530" fill="#134e4a" font-weight="600">effect ledger · 幂等副作用账本</text>
+
+  <text class="tiny" x="1182" y="572">PostgreSQL 行锁 + 事务 + 唯一约束</text>
+  <text class="tiny" x="1182" y="592">订单与 Outbox 在同一事务落库</text>
+
+  <!-- Background jobs -->
+  <rect x="1164" y="624" width="444" height="164" rx="12" fill="#ffffff" stroke="#99f6e4"/>
+  <text class="box-title" x="1182" y="650">后台调度与出站</text>
+  <text class="small" x="1182" y="676">过期预占回收 · 定时事务，不依赖下次用户请求</text>
+  <text class="small" x="1182" y="700">Outbox 重试投递 · HMAC-SHA256 签名</text>
+  <text class="small" x="1182" y="724">production profile 强制配置 Webhook 与密钥</text>
+  <text class="tiny" x="1182" y="752">本地非 production 使用显式本地事件 sink</text>
+  <text class="tiny" x="1182" y="772">支付 / 退款 / 物流不在当前范围</text>
+
+  <!-- ======================= Edges ======================= -->
+  <!-- Web -> Keycloak -->
+  <line x1="174" y1="300" x2="174" y2="262" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="edge-label" x="186" y="284">OIDC 登录</text>
+
+  <!-- Agent -> Keycloak (JWKS) -->
+  <line x1="360" y1="196" x2="302" y2="196" stroke="#a78bfa" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow-dashed)"/>
+  <text class="edge-label" x="331" y="186" text-anchor="middle">JWKS</text>
+
+  <!-- Web -> Agent -->
+  <line x1="300" y1="232" x2="358" y2="232" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text class="edge-label" x="329" y="220" text-anchor="middle">JWT</text>
+  <text class="edge-label" x="329" y="252" text-anchor="middle">SSE</text>
+
+  <!-- Agent -> Commerce (MCP) -->
+  <line x1="940" y1="470" x2="1138" y2="470" stroke="#0d9488" stroke-width="2" marker-end="url(#arrow)"/>
+  <text class="edge-label" x="1040" y="452" text-anchor="middle" fill="#0f766e">MCP · Streamable HTTP</text>
+  <text class="edge-label" x="1040" y="492" text-anchor="middle" fill="#0f766e">服务凭证 · 超时 / 熔断</text>
+  <text class="tiny" x="1040" y="516" text-anchor="middle" fill="#0f766e">Agent 不计算金额</text>
+  <text class="tiny" x="1040" y="532" text-anchor="middle" fill="#0f766e">不写库存、不建订单</text>
+
+  <!-- Agent -> bottom services -->
+  <line x1="470" y1="820" x2="470" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="480" y="856">限流 / 队列</text>
+
+  <line x1="700" y1="820" x2="724" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="736" y="850">PlanSpec</text>
+
+  <line x1="900" y1="820" x2="944" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="956" y="850">embedding</text>
+
+  <line x1="930" y1="820" x2="1130" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="1064" y="846">命令 / 状态 / checkpoint</text>
+
+  <!-- Commerce -> bottom -->
+  <line x1="1180" y1="820" x2="1200" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="1212" y="850">交易事实</text>
+
+  <line x1="1500" y1="820" x2="1496" y2="878" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="tiny" x="1508" y="850">Outbox</text>
+
+  <!-- ======================= Bottom row ======================= -->
+  <rect x="360" y="880" width="220" height="170" rx="14" fill="#f1f5f9" stroke="#64748b" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="360" y="880" width="220" height="5" rx="2.5" fill="#64748b"/>
+  <text class="box-title" x="378" y="912">Redis 7.4</text>
+  <text class="small" x="378" y="938">Lua Token Bucket 限流</text>
+  <text class="small" x="378" y="960">公平队列 / 执行许可</text>
+  <text class="small" x="378" y="982">Pub/Sub 唤醒 SSE</text>
+  <text class="tiny" x="378" y="1016">只做协调，不存交易事实</text>
+  <text class="tiny" x="378" y="1036">丢失后由 PostgreSQL 重建</text>
+
+  <rect x="620" y="880" width="220" height="170" rx="14" fill="#fff1f2" stroke="#e11d48" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="620" y="880" width="220" height="5" rx="2.5" fill="#e11d48"/>
+  <text class="box-title" x="638" y="912">DeepSeek Chat API</text>
+  <text class="small" x="638" y="938">OpenAI 兼容协议</text>
+  <text class="small" x="638" y="960">结构化 PlanSpec 输出</text>
+  <text class="small" x="638" y="982">失败进入重试 / 失败态</text>
+  <text class="tiny" x="638" y="1016">没有规则模型降级</text>
+
+  <rect x="860" y="880" width="180" height="170" rx="14" fill="#fff1f2" stroke="#e11d48" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="860" y="880" width="180" height="5" rx="2.5" fill="#e11d48"/>
+  <text class="box-title" x="878" y="912">Ollama</text>
+  <text class="small" x="878" y="938">embeddinggemma</text>
+  <text class="small" x="878" y="960">本地向量生成</text>
+  <text class="small" x="878" y="982">写入 pgvector</text>
+  <text class="tiny" x="878" y="1016">无关键词检索降级</text>
+
+  <rect x="1060" y="880" width="280" height="170" rx="14" fill="#f1f5f9" stroke="#334155" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="1060" y="880" width="280" height="5" rx="2.5" fill="#334155"/>
+  <text class="box-title" x="1078" y="912">PostgreSQL 17 + pgvector</text>
+  <text class="small" x="1078" y="936">agent_schema：命令 / 状态</text>
+  <text class="small" x="1078" y="956">checkpoint / SSE 事件</text>
+  <text class="small" x="1078" y="976">commerce_schema：商品 / 库存</text>
+  <text class="small" x="1078" y="996">快照 / 订单 / effect ledger</text>
+  <text class="tiny" x="1078" y="1026">唯一事实源 · 事务 + 行锁</text>
+
+  <rect x="1360" y="880" width="272" height="170" rx="14" fill="#f1f5f9" stroke="#64748b" stroke-width="1.3" filter="url(#shadow)"/>
+  <rect x="1360" y="880" width="272" height="5" rx="2.5" fill="#64748b"/>
+  <text class="box-title" x="1378" y="912">Webhook 消费方</text>
+  <text class="small" x="1378" y="938">生产 profile 启用</text>
+  <text class="small" x="1378" y="960">HMAC-SHA256 签名</text>
+  <text class="small" x="1378" y="982">失败重试 · Outbox 驱动</text>
+  <text class="tiny" x="1378" y="1016">本地使用显式本地 sink</text>
+
+  <!-- Footer -->
+  <text class="tiny" x="48" y="1090">边界原则：Agent 只做理解、受限规划、检索与推荐；LLM 不生成任意 DAG，金额 / 库存 / 履约 / 订单只来自 Commerce。</text>
+  <text class="tiny" x="1632" y="1090" text-anchor="end">源码：commerce-port · commerce-service · agent-app · web</text>
+</svg>
